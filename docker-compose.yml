@@ -1,0 +1,78 @@
+x-app-image: &app-image
+  build: .
+  image: rss-kindle:latest
+  restart: unless-stopped
+
+services:
+  rss-kindle:
+    <<: *app-image
+    container_name: rss-kindle
+    command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      DATABASE_PATH: /app/data/rss_kindle.db
+      FRESHRSS_API_URL: ${FRESHRSS_API_URL:?set FRESHRSS_API_URL}
+      FRESHRSS_USERNAME: ${FRESHRSS_USERNAME:?set FRESHRSS_USERNAME}
+      FRESHRSS_API_PASSWORD: ${FRESHRSS_API_PASSWORD:?set FRESHRSS_API_PASSWORD}
+      APP_AUTH_USERNAME: ${APP_AUTH_USERNAME:-}
+      APP_AUTH_PASSWORD: ${APP_AUTH_PASSWORD:-}
+      APP_AUTH_SECRET: ${APP_AUTH_SECRET:-}
+      APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-true}
+      APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
+      SOURCE_BRIDGE_API_URL: ${SOURCE_BRIDGE_API_URL:-http://source-bridge:8100}
+      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
+      MAX_STREAM_ITEMS: ${MAX_STREAM_ITEMS:-15}
+      METADATA_CACHE_SECONDS: ${METADATA_CACHE_SECONDS:-60}
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-20}
+      USER_AGENT: ${USER_AGENT:-rss-kindle/0.1 (+https://example.invalid; self-hosted personal reader)}
+
+  browser-cdp:
+    <<: *app-image
+    container_name: rss-kindle-browser-cdp
+    command:
+      - sh
+      - -lc
+      - >
+        python -m app.cdp_proxy --listen-host 0.0.0.0 --listen-port 9223 --target-host 127.0.0.1 --target-port 9222 &
+        xvfb-run -a /ms-playwright/chromium-1208/chrome-linux64/chrome
+        --no-first-run
+        --no-default-browser-check
+        --disable-dev-shm-usage
+        --disable-gpu
+        --no-sandbox
+        --user-data-dir=${CDP_BROWSER_PROFILE_PATH:-/app/data/browser-profiles/cdp}
+        --remote-debugging-address=0.0.0.0
+        --remote-debugging-port=9222
+        about:blank
+    expose:
+      - "9223"
+    shm_size: "1gb"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    profiles:
+      - browser-cdp
+
+  source-bridge:
+    <<: *app-image
+    container_name: rss-kindle-source-bridge
+    command: ["uvicorn", "app.source_main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8100"]
+    ports:
+      - "8100:8100"
+    shm_size: "1gb"
+    volumes:
+      - ./data:/app/data
+      - ./source-bridge.toml:/app/source-bridge.toml:ro
+    environment:
+      DATABASE_PATH: /app/data/source_bridge.db
+      SOURCE_BRIDGE_CONFIG_PATH: /app/source-bridge.toml
+      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
+      APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
+      SOURCE_BRIDGE_REFRESH_SECONDS: ${SOURCE_BRIDGE_REFRESH_SECONDS:-900}
+      SOURCE_BRIDGE_PREWARM_ENABLED: ${SOURCE_BRIDGE_PREWARM_ENABLED:-true}
+      SOURCE_BRIDGE_PREWARM_INTERVAL_SECONDS: ${SOURCE_BRIDGE_PREWARM_INTERVAL_SECONDS:-60}
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-20}
+      USER_AGENT: ${USER_AGENT:-rss-kindle/0.1 (+https://example.invalid; self-hosted personal reader)}

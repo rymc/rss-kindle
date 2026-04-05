@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-header">
+  <h2>Feeds</h2>
+</section>
+
+{% if feeds %}
+<ul class="item-list">
+  {% for feed in feeds %}
+  <li class="item-card feed-card">
+    <h2><a href="{{ request.url_for('feed_view', feed_id=feed.token) }}">{{ feed.title }}</a></h2>
+    <div class="item-meta">
+      {% if feed.site_url %}
+      <span>{{ feed.site_url }}</span>
+      {% endif %}
+      {% if feed.group_slugs %}
+      <span>
+        {% for group in groups if group.slug in feed.group_slugs %}
+        {{ group.name }}{% if not loop.last %}, {% endif %}
+        {% endfor %}
+      </span>
+      {% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty-state">No feeds available from FreshRSS.</p>
+{% endif %}
+{% endblock %}

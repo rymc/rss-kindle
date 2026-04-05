@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ page_title }} | RSS Kindle</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}" />
+  </head>
+  <body>
+    {% if show_site_header is not defined %}{% set show_site_header = true %}{% endif %}
+    {% if show_feed_jump is not defined %}{% set show_feed_jump = true %}{% endif %}
+    {% if show_site_header %}
+    <header class="site-header">
+      <div class="site-title-row">
+        <h1><a href="{{ request.url_for('home') }}">RSS Kindle</a></h1>
+        <div class="site-header-actions">
+          {% if auth_enabled and current_user %}
+          <form method="post" action="{{ request.url_for('logout') }}" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit" class="text-button">Log out</button>
+          </form>
+          {% endif %}
+        </div>
+      </div>
+
+      <nav class="kindle-group-nav">
+        <a href="{{ request.url_for('home') }}" class="{% if not active_group_slug and not active_feed_id %}active{% endif %}">All</a>
+        {% for group in groups %}
+        <a href="{{ request.url_for('group_view', slug=group.slug) }}" class="{% if active_group_slug == group.slug %}active{% endif %}">
+          {{ group.name }}
+        </a>
+        {% endfor %}
+        <a href="{{ request.url_for('feeds_index') }}">Feeds</a>
+      </nav>
+
+      {% if show_feed_jump %}
+      <form method="get" action="{{ request.url_for('feeds_index') }}" class="feed-jump-form">
+        <label for="feed_jump" class="sr-only">Browse feeds</label>
+        <select id="feed_jump" name="feed" aria-label="Browse feeds">
+          <option value="">Source</option>
+          {% for feed in feeds %}
+          <option value="{{ feed.token }}" {% if active_feed_id == feed.token %}selected{% endif %}>{{ feed.title }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Go</button>
+      </form>
+      {% endif %}
+    </header>
+    {% endif %}
+
+    <main class="content">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

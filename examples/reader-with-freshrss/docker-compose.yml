@@ -1,0 +1,50 @@
+x-app-image: &app-image
+  build:
+    context: ../..
+  image: rss-kindle:latest
+  restart: unless-stopped
+
+services:
+  rss-kindle:
+    <<: *app-image
+    container_name: rss-kindle
+    command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${RSS_KINDLE_DATA_DIR:-/srv/rss-kindle/data}:/app/data
+    environment:
+      DATABASE_PATH: /app/data/rss_kindle.db
+      FRESHRSS_API_URL: http://freshrss/api/greader.php
+      FRESHRSS_USERNAME: ${FRESHRSS_USERNAME:?set FRESHRSS_USERNAME}
+      FRESHRSS_API_PASSWORD: ${FRESHRSS_API_PASSWORD:?set FRESHRSS_API_PASSWORD}
+      APP_AUTH_USERNAME: ${APP_AUTH_USERNAME:-}
+      APP_AUTH_PASSWORD: ${APP_AUTH_PASSWORD:-}
+      APP_AUTH_SECRET: ${APP_AUTH_SECRET:-}
+      APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-true}
+      APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
+      MAX_STREAM_ITEMS: ${MAX_STREAM_ITEMS:-15}
+      METADATA_CACHE_SECONDS: ${METADATA_CACHE_SECONDS:-60}
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-20}
+      USER_AGENT: ${USER_AGENT:-rss-kindle/0.1 (+https://example.invalid; self-hosted personal reader)}
+    networks:
+      - rss-kindle
+
+  freshrss:
+    image: freshrss/freshrss:latest
+    container_name: freshrss
+    ports:
+      - "8081:80"
+    volumes:
+      - ${FRESHRSS_DATA_DIR:-/srv/freshrss/data}:/var/www/FreshRSS/data
+      - ${FRESHRSS_EXTENSIONS_DIR:-/srv/freshrss/extensions}:/var/www/FreshRSS/extensions
+    environment:
+      TZ: ${TZ:-UTC}
+      CRON_MIN: ${FRESHRSS_CRON_MIN:-13,43}
+    restart: unless-stopped
+    networks:
+      - rss-kindle
+
+networks:
+  rss-kindle:
+    driver: bridge

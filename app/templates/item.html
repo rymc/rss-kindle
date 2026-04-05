@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block content %}
+<article class="article-view">
+  <header class="page-header article-header-compact">
+    <h2>{{ entry.title }}</h2>
+    <div class="item-meta item-meta-inline article-meta-compact">
+      <span class="item-source">{{ source_label }}</span>
+      <span class="meta-sep" aria-hidden="true">·</span>
+      <time class="item-time" datetime="{{ entry.published_at or '' }}">{{ entry.published_at|format_relative_time }}</time>
+    </div>
+  </header>
+  <div class="article-body">
+    {{ content_html | safe }}
+  </div>
+
+  <div class="action-row action-row-bottom">
+    {% if previous_item %}
+    <form method="post" action="{{ request.url_for('open_item', entry_id=previous_item.entry_id) }}" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_path" value="{{ previous_item.detail_url }}" />
+      <button type="submit" class="button-link">Previous</button>
+    </form>
+    {% endif %}
+    {% if next_item %}
+    <form method="post" action="{{ request.url_for('open_item', entry_id=next_item.entry_id) }}" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_path" value="{{ next_item.detail_url }}" />
+      <button type="submit" class="button-link">Next</button>
+    </form>
+    {% endif %}
+    <a class="button-link" href="{{ back_url }}">Back to list</a>
+    <form method="post" action="{{ request.url_for(entry.is_starred and 'mark_item_unstarred' or 'mark_item_starred', entry_id=entry.id) }}" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_path" value="{{ current_path }}" />
+      <button type="submit">{% if entry.is_starred %}Unstar{% else %}Star{% endif %}</button>
+    </form>
+    <form method="post" action="{{ request.url_for('mark_item_unread', entry_id=entry.id) }}" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_path" value="{{ back_url }}" />
+      <button type="submit">Mark unread</button>
+    </form>
+    {% if entry.url %}
+    <p class="article-source-bottom">
+      <a href="{{ entry.url }}" target="_blank" rel="noreferrer">Open original</a>
+    </p>
+    {% endif %}
+  </div>
+</article>
+{% endblock %}

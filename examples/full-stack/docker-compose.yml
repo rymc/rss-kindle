@@ -1,0 +1,95 @@
+x-app-image: &app-image
+  build:
+    context: ../..
+  image: rss-kindle:latest
+  restart: unless-stopped
+
+services:
+  rss-kindle:
+    <<: *app-image
+    container_name: rss-kindle
+    command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    expose:
+      - "8000"
+    volumes:
+      - ${RSS_KINDLE_DATA_DIR:-/srv/rss-kindle/data}:/app/data
+    environment:
+      DATABASE_PATH: /app/data/rss_kindle.db
+      FRESHRSS_API_URL: ${FRESHRSS_API_URL:?set FRESHRSS_API_URL}
+      FRESHRSS_USERNAME: ${FRESHRSS_USERNAME:?set FRESHRSS_USERNAME}
+      FRESHRSS_API_PASSWORD: ${FRESHRSS_API_PASSWORD:?set FRESHRSS_API_PASSWORD}
+      APP_AUTH_USERNAME: ${APP_AUTH_USERNAME:-}
+      APP_AUTH_PASSWORD: ${APP_AUTH_PASSWORD:-}
+      APP_AUTH_SECRET: ${APP_AUTH_SECRET:-}
+      APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-true}
+      APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
+      SOURCE_BRIDGE_API_URL: ${SOURCE_BRIDGE_API_URL:-http://source-bridge:8100}
+      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
+      MAX_STREAM_ITEMS: ${MAX_STREAM_ITEMS:-15}
+      METADATA_CACHE_SECONDS: ${METADATA_CACHE_SECONDS:-60}
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-20}
+      USER_AGENT: ${USER_AGENT:-rss-kindle/0.1 (+https://example.invalid; self-hosted personal reader)}
+    networks:
+      - rss-kindle
+
+  source-bridge:
+    <<: *app-image
+    container_name: rss-kindle-source-bridge
+    command: ["uvicorn", "app.source_main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8100"]
+    expose:
+      - "8100"
+    shm_size: "1gb"
+    volumes:
+      - ${RSS_KINDLE_DATA_DIR:-/srv/rss-kindle/data}:/app/data
+      - ${RSS_KINDLE_SOURCE_BRIDGE_CONFIG:-/srv/rss-kindle/source-bridge.toml}:/app/source-bridge.toml:ro
+    environment:
+      DATABASE_PATH: /app/data/source_bridge.db
+      SOURCE_BRIDGE_CONFIG_PATH: /app/source-bridge.toml
+      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
+      APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
+      SOURCE_BRIDGE_REFRESH_SECONDS: ${SOURCE_BRIDGE_REFRESH_SECONDS:-900}
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-20}
+      USER_AGENT: ${USER_AGENT:-rss-kindle/0.1 (+https://example.invalid; self-hosted personal reader)}
+    networks:
+      - rss-kindle
+
+  freshrss:
+    image: freshrss/freshrss:latest
+    container_name: freshrss
+    expose:
+      - "80"
+    ports:
+      - "8081:80"
+    volumes:
+      - ${FRESHRSS_DATA_DIR:-/srv/freshrss/data}:/var/www/FreshRSS/data
+      - ${FRESHRSS_EXTENSIONS_DIR:-/srv/freshrss/extensions}:/var/www/FreshRSS/extensions
+    environment:
+      TZ: ${TZ:-UTC}
+      CRON_MIN: ${FRESHRSS_CRON_MIN:-13,43}
+    restart: unless-stopped
+    networks:
+      - rss-kindle
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: rss-kindle-caddy
+    depends_on:
+      - rss-kindle
+      - freshrss
+    ports:
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    networks:
+      - rss-kindle
+
+networks:
+  rss-kindle:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

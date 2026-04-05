@@ -1,0 +1,16 @@
+{
+  auto_https off
+}
+
+# Replace these example hostnames with DNS names that resolve to this server.
+freshrss.home.arpa {
+  reverse_proxy freshrss:80
+}
+
+rss-kindle.home.arpa {
+  reverse_proxy rss-kindle:8000
+}
+
+:80 {
+  reverse_proxy rss-kindle:8000
+}

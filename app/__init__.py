@@ -1,0 +1,2 @@
+"""RSS Kindle application package."""
+

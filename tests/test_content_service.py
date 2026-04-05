@@ -1,0 +1,363 @@
+from pathlib import Path
+
+from app.config import Settings
+from app.content_service import ArticleExtractor
+from app.db import Database
+from app.freshrss import FreshRSSEntry
+from app.repository import Repository
+
+TEST_BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+class FakeResponse:
+    def __init__(self, text: str, status_code: int = 200, json_payload: dict | None = None):
+        self.text = text
+        self.status_code = status_code
+        self._json_payload = json_payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        if self._json_payload is None:
+            raise ValueError("No JSON payload")
+        return self._json_payload
+
+
+class FakeClient:
+    def __init__(self, response: FakeResponse):
+        self.response = response
+        self.calls: list[dict] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        return self.response
+
+
+def fail_if_called():
+    raise AssertionError("network fetch should not be used")
+
+
+def build_settings(tmp_path: Path) -> Settings:
+    return Settings(
+        app_name="RSS Kindle",
+        base_dir=TEST_BASE_DIR,
+        database_path=tmp_path / "content.db",
+        http_timeout_seconds=5,
+        user_agent="test-agent",
+        max_stream_items=15,
+        metadata_cache_seconds=60,
+        freshrss_api_url="https://rss.example.net/api/greader.php",
+        freshrss_username="alice",
+        freshrss_api_password="secret",
+    )
+
+
+def build_entry() -> FreshRSSEntry:
+    return FreshRSSEntry(
+        id="entry-1",
+        title="Substack Story",
+        author="Writer",
+        url="https://example.substack.com/p/story",
+        published_at="2026-03-29T10:00:00+00:00",
+        summary_html="<p>Read more</p>",
+        summary_text="Read more",
+        content_html="<p>Read more</p>",
+        feed_title="Substack Feed",
+        feed_site_url="https://example.com",
+        feed_token="feed-token",
+        group_names=("Tech",),
+        is_starred=False,
+    )
+
+
+def test_substack_available_content_is_preferred(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    html = """
+    <html>
+      <body>
+        <button>Read distraction-free on Substack</button>
+        <div class="available-content">
+          <div class="body markup">
+            <p>Actual first paragraph.</p>
+            <p>Actual second paragraph.</p>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=lambda: FakeClient(FakeResponse(html)),
+    )
+
+    article = extractor.ensure_extracted(build_entry())
+
+    assert article.extraction_status == "success"
+    assert "Actual first paragraph." in article.html
+    assert "Read distraction-free on Substack" not in article.html
+
+
+def test_failed_extraction_is_cached_and_reused(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    html = """
+    <html>
+      <body>
+        <div class="available-content"><div class="body markup"></div></div>
+        <div class="paywall">This post is for paid subscribers</div>
+      </body>
+    </html>
+    """
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=lambda: FakeClient(FakeResponse(html)),
+    )
+    entry = build_entry()
+
+    first = extractor.ensure_extracted(entry)
+    second = extractor.ensure_extracted(entry)
+
+    assert first.extraction_status == "failed"
+    assert "paywalled" in (first.error_message or "").lower()
+    assert second.extraction_status == "failed"
+    assert repository.get_cached_article(entry.id, entry.url) is not None
+
+
+def test_promo_only_extraction_falls_back_instead_of_caching_success(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    html = """
+    <html>
+      <head><title>Edit PDFs Easily and Securely</title></head>
+      <body>
+        <article>
+          <h1>Edit PDFs Easily and Securely</h1>
+          <h3>BreezePDF PRO</h3>
+          <p>Unlimited downloads, desktop app, CLI tools, PDF signing &amp; OCR — <strong>$12/mo</strong></p>
+        </article>
+      </body>
+    </html>
+    """
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=lambda: FakeClient(FakeResponse(html)),
+    )
+    entry = FreshRSSEntry(
+        id="entry-2",
+        title="Show HN: BreezePDF – Free, in-browser PDF editor",
+        author="Writer",
+        url="https://breezepdf.com/?v=3",
+        published_at="2026-03-29T10:00:00+00:00",
+        summary_html="<p><a href=\"https://news.ycombinator.com/item?id=1\">Comments</a></p>",
+        summary_text="Comments",
+        content_html="<p><a href=\"https://news.ycombinator.com/item?id=1\">Comments</a></p>",
+        feed_title="Hacker News",
+        feed_site_url="https://news.ycombinator.com",
+        feed_token="feed-token",
+        group_names=("Tech",),
+        is_starred=False,
+    )
+
+    article = extractor.ensure_extracted(entry)
+
+    assert article.extraction_status == "failed"
+    assert "too little meaningful article text" in (article.error_message or "").lower()
+    assert "Open the source article" in article.html
+
+
+def test_meaningful_feed_content_is_preferred_over_direct_fetch(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    entry = FreshRSSEntry(
+        id="entry-3",
+        title="FT synthetic story",
+        author="Reporter",
+        url="https://www.ft.com/content/example",
+        published_at="2026-03-29T10:00:00+00:00",
+        summary_html="<p>Short summary</p>",
+        summary_text="Short summary",
+        content_html="<article><h1>FT synthetic story</h1><p>First real paragraph with substantial detail about the story and what happened in the market today.</p><p>Second paragraph with more context and analysis for readers.</p></article>",
+        feed_title="FT synthetic",
+        feed_site_url="https://www.ft.com",
+        feed_token="feed-token",
+        group_names=("World",),
+        is_starred=False,
+    )
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=fail_if_called,
+    )
+
+    article = extractor.ensure_extracted(entry)
+
+    assert article.extraction_status == "success"
+    assert "First real paragraph" in article.html
+    assert article.error_message is None
+
+
+def test_failed_cache_is_replaced_when_feed_content_becomes_meaningful(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    entry = FreshRSSEntry(
+        id="entry-4",
+        title="Recovered story",
+        author="Reporter",
+        url="https://www.ft.com/content/recovered",
+        published_at="2026-03-29T10:00:00+00:00",
+        summary_html="<p>Older teaser</p>",
+        summary_text="Older teaser",
+        content_html="<article><h1>Recovered story</h1><p>Fresh full text from the synthetic feed with enough detail to qualify as the article body.</p><p>More context in a second paragraph.</p></article>",
+        feed_title="FT synthetic",
+        feed_site_url="https://www.ft.com",
+        feed_token="feed-token",
+        group_names=("World",),
+        is_starred=False,
+    )
+    repository.save_cached_article(
+        entry.id,
+        source_url=entry.url,
+        extracted_html="<article><h1>Recovered story</h1><p>HTTP 403</p></article>",
+        extracted_text="HTTP 403",
+        extraction_status="failed",
+        error_message="HTTP 403",
+    )
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=fail_if_called,
+    )
+
+    article = extractor.ensure_extracted(entry)
+    cached = repository.get_cached_article(entry.id, entry.url)
+
+    assert article.extraction_status == "success"
+    assert "Fresh full text from the synthetic feed" in article.html
+    assert cached is not None
+    assert cached.extraction_status == "success"
+    assert "Fresh full text from the synthetic feed" in (cached.extracted_html or "")
+
+
+def test_source_bridge_article_fetch_is_used_when_feed_only_has_teaser(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    settings = Settings(
+        **{**settings.__dict__, "source_bridge_api_url": "http://source-bridge:8100"}
+    )
+    entry = FreshRSSEntry(
+        id="entry-5",
+        title="Bridge recovered story",
+        author="Reporter",
+        url="https://www.ft.com/content/recovered-by-bridge",
+        published_at="2026-03-29T10:00:00+00:00",
+        summary_html="<p>Short teaser</p>",
+        summary_text="Short teaser",
+        content_html="<p>Complete digital access to quality FT journalism with expert analysis from industry leaders. Pay a year upfront and save 20%.</p>",
+        feed_title="FT synthetic",
+        feed_site_url="https://www.ft.com",
+        feed_token="feed-token",
+        group_names=("World",),
+        is_starred=False,
+    )
+    repository.save_cached_article(
+        entry.id,
+        source_url=entry.url,
+        extracted_html="<article><h1>Bridge recovered story</h1><p>HTTP 403</p></article>",
+        extracted_text="HTTP 403",
+        extraction_status="failed",
+        error_message="HTTP 403",
+    )
+    bridge_response = FakeResponse(
+        "",
+        json_payload={
+            "source_id": "ft-home",
+            "article_url": entry.url,
+            "title": entry.title,
+            "content_html": "<article><h1>Bridge recovered story</h1><p>Recovered from the authenticated source bridge instead of the stale teaser content in FreshRSS.</p><p>Second paragraph with extra detail.</p></article>",
+            "summary_text": "Recovered from the authenticated source bridge.",
+            "published_at": "2026-03-30T12:00:00+00:00",
+        },
+    )
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=fail_if_called,
+        bridge_client_factory=lambda: FakeClient(bridge_response),
+    )
+
+    article = extractor.ensure_extracted(entry)
+
+    assert article.extraction_status == "success"
+    assert "Recovered from the authenticated source bridge" in article.html
+    assert "Complete digital access to quality FT journalism" not in article.html
+
+
+def test_source_bridge_token_is_forwarded_when_configured(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    settings = Settings(
+        **{
+            **settings.__dict__,
+            "source_bridge_api_url": "http://source-bridge:8100",
+            "source_bridge_access_token": "bridge-token",
+        }
+    )
+    entry = FreshRSSEntry(
+        id="entry-6",
+        title="Bridge token story",
+        author="Reporter",
+        url="https://www.ft.com/content/token-story",
+        published_at="2026-03-29T10:00:00+00:00",
+        summary_html="<p>Short teaser</p>",
+        summary_text="Short teaser",
+        content_html="<p>Short teaser</p>",
+        feed_title="FT synthetic",
+        feed_site_url="https://www.ft.com",
+        feed_token="feed-token",
+        group_names=("World",),
+        is_starred=False,
+    )
+    bridge_client = FakeClient(
+        FakeResponse(
+            "",
+            json_payload={
+                "source_id": "ft-home",
+                "article_url": entry.url,
+                "title": entry.title,
+                "content_html": "<article><h1>Bridge token story</h1><p>Recovered body paragraph one with enough detail to count.</p><p>Recovered body paragraph two with more detail.</p></article>",
+                "summary_text": "Recovered body",
+                "published_at": "2026-03-30T12:00:00+00:00",
+            },
+        )
+    )
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=fail_if_called,
+        bridge_client_factory=lambda: bridge_client,
+    )
+
+    article = extractor.ensure_extracted(entry)
+
+    assert article.extraction_status == "success"
+    assert bridge_client.calls
+    assert bridge_client.calls[0]["headers"] == {"X-Source-Bridge-Token": "bridge-token"}

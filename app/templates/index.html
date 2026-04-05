@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% if page_title != "Unread" %}
+<p class="stream-context">{{ page_title }}</p>
+{% endif %}
+
+{% if items %}
+<ul class="item-list">
+  {% for item in items %}
+  <li class="item-card item-card-stream">
+    <div class="card-corner-actions">
+      <form method="post" action="{{ request.url_for(item.is_starred and 'mark_item_unstarred' or 'mark_item_starred', entry_id=item.id) }}" class="inline-form card-corner-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_path" value="{{ current_path }}" />
+        <button type="submit" class="card-corner-button card-corner-button-star {% if item.is_starred %}is-active{% endif %}" aria-label="{% if item.is_starred %}Unstar{% else %}Star{% endif %} {{ item.title }}">*</button>
+      </form>
+      <form method="post" action="{{ request.url_for('mark_item_read', entry_id=item.id) }}" class="inline-form card-corner-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_path" value="{{ current_path }}" />
+        <button type="submit" class="card-corner-button" aria-label="Mark {{ item.title }} as read">x</button>
+      </form>
+    </div>
+    <div class="item-meta item-meta-inline">
+      <time class="item-time" datetime="{{ item.published_at or '' }}">{{ item.published_at|format_relative_time }}</time>
+      <span class="meta-sep" aria-hidden="true">|</span>
+      <span class="item-source">{{ item.source_label }}</span>
+      {% if item.group_display %}
+      <span class="meta-sep" aria-hidden="true">|</span>
+      <span class="item-group">{{ item.group_display }}</span>
+      {% endif %}
+    </div>
+    <h2>
+      <form method="post" action="{{ request.url_for('open_item', entry_id=item.id) }}" class="title-open-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_path" value="{{ item.detail_url }}" />
+        <button type="submit" class="title-link-button">{{ item.title }}</button>
+      </form>
+    </h2>
+    {% if item.comments_url and item.summary_is_comments %}
+    <p><a href="{{ item.comments_url }}" target="_blank" rel="noreferrer">Comments</a></p>
+    {% elif item.summary_text %}
+    <p>{{ item.summary_text|excerpt(160) }}</p>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty-state">No unread items in this view.</p>
+{% endif %}
+
+{% if newer_url or older_url %}
+<nav class="pager">
+  {% if newer_url %}
+  <a href="{{ newer_url }}">Newer</a>
+  {% endif %}
+  {% if older_url %}
+  <a href="{{ older_url }}">Older</a>
+  {% endif %}
+</nav>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,31 @@
+# This file is an example, not a special FT-only format.
+# Duplicate and rename auth profiles and sources for any site you want to bridge.
+# Keep real secrets, cookie files, and browser profiles local and untracked.
+
+[auth_profiles.ft]
+domains = ["ft.com"]
+# Optional: seed the browser session from a saved Cookie header or Netscape cookie jar.
+# cookie_jar_path = "./data/ft.cookie-header"
+# Optional: attach to an already-running Chromium over CDP instead of launching a browser per request.
+# browser_cdp_url = "http://browser-cdp:9223"
+browser_profile_path = "./data/browser-profiles/ft"
+# browser_channel = "chrome"
+browser_headless = true
+
+[sources.ft-home]
+title = "FT Front Page"
+start_urls = ["https://www.ft.com/news-feed"]
+# Scope discovery to the content area so nav links do not become feed items.
+link_selector = "#site-content a[href]"
+include_url_patterns = [
+  "^https://www\\.ft\\.com/content/",
+]
+auth_profile = "ft"
+fetch_backend = "browser"
+browser_wait_until = "load"
+browser_wait_for_selector = "article, main"
+browser_settle_seconds = 3
+discovery_browser_wait_until = "load"
+discovery_browser_settle_seconds = 5
+max_items = 10
+refresh_seconds = 900
