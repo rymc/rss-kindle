@@ -4,6 +4,9 @@
 {% if stream_context %}
 <p class="stream-context">{{ stream_context }}</p>
 {% endif %}
+{% if stream_is_stale %}
+<p class="stream-stale-notice" role="status">FreshRSS unavailable · showing cached articles</p>
+{% endif %}
 
 {% if items %}
 <ul class="item-list" id="stream-start" data-paged-stream data-stream-offset="{{ stream_offset }}" data-empty-message="{{ empty_message }}"{% if request.url.path == '/starred' %} data-starred-view{% endif %}{% if include_read %} data-include-read{% endif %}>

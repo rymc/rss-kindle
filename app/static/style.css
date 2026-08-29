@@ -169,6 +169,16 @@ button,
   font-weight: bold;
 }
 
+.stream-stale-notice {
+  margin: 0 0 0.45rem;
+  padding: 0.2rem 0.4rem;
+  border-left: 3px solid #873535;
+  background: #fff0f0;
+  color: #711e1e;
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
 .category-picker h2 {
   margin: 0 0 0.7rem;
   font-size: 1.2rem;

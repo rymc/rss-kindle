@@ -70,6 +70,7 @@ class FreshRSSEntry:
 class FreshRSSStreamPage:
     entries: list[FreshRSSEntry]
     continuation: str | None
+    is_stale: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,9 +141,6 @@ class FreshRSSClient:
             tuple[float, FreshRSSStreamPage],
         ] = {}
         self._stream_cache_generation = 0
-        self._stream_refreshing: set[tuple[str, str | None, str | None, int, bool]] = (
-            set()
-        )
 
     def _default_client_factory(self) -> httpx.Client:
         return httpx.Client(
@@ -195,34 +193,30 @@ class FreshRSSClient:
         cache_key = (scope_kind, scope_value, continuation, limit, include_read)
         now = time.monotonic()
         cache_generation = 0
+        cached: tuple[float, FreshRSSStreamPage] | None = None
         if self.settings.stream_cache_seconds > 0:
-            refresh_stale = False
             with self._lock:
                 cache_generation = self._stream_cache_generation
                 cached = self._stream_cache.get(cache_key)
-                if cached is not None:
-                    if cached[0] > now:
-                        return cached[1]
-                    if cache_key not in self._stream_refreshing:
-                        self._stream_refreshing.add(cache_key)
-                        refresh_stale = True
-            if cached is not None:
-                if refresh_stale:
-                    threading.Thread(
-                        target=self._refresh_stream_cache,
-                        args=(cache_key, cache_generation),
-                        name="freshrss-stream-refresh",
-                        daemon=True,
-                    ).start()
+            if cached is not None and cached[0] > now:
                 return cached[1]
 
-        page = self._load_stream(
-            scope_kind=scope_kind,
-            scope_value=scope_value,
-            continuation=continuation,
-            limit=limit,
-            include_read=include_read,
-        )
+        try:
+            page = self._load_stream(
+                scope_kind=scope_kind,
+                scope_value=scope_value,
+                continuation=continuation,
+                limit=limit,
+                include_read=include_read,
+            )
+        except (FreshRSSError, httpx.HTTPError, ValueError):
+            if cached is None:
+                raise
+            logger.warning(
+                "FreshRSS stream refresh failed; serving the expired cache",
+                exc_info=True,
+            )
+            return replace(cached[1], is_stale=True)
         self._store_stream_cache(cache_key, page, expected_generation=cache_generation)
         return page
 
@@ -276,30 +270,6 @@ class FreshRSSClient:
                 )
                 self._stream_cache.pop(oldest_key, None)
             self._stream_cache[cache_key] = (expires_at, page)
-
-    def _refresh_stream_cache(
-        self,
-        cache_key: tuple[str, str | None, str | None, int, bool],
-        expected_generation: int,
-    ) -> None:
-        try:
-            page = self._load_stream(
-                scope_kind=cache_key[0],
-                scope_value=cache_key[1],
-                continuation=cache_key[2],
-                limit=cache_key[3],
-                include_read=cache_key[4],
-            )
-            self._store_stream_cache(
-                cache_key,
-                page,
-                expected_generation=expected_generation,
-            )
-        except Exception:
-            logger.warning("FreshRSS stream background refresh failed", exc_info=True)
-        finally:
-            with self._lock:
-                self._stream_refreshing.discard(cache_key)
 
     def get_entry(self, entry_id: str) -> FreshRSSEntry | None:
         cached = self._get_cached_entry(entry_id)
@@ -445,9 +415,7 @@ class FreshRSSClient:
                 if entries != page.entries:
                     self._stream_cache[key] = (
                         expires_at,
-                        FreshRSSStreamPage(
-                            entries=entries, continuation=page.continuation
-                        ),
+                        replace(page, entries=entries),
                     )
 
     def _set_cached_stream_starred(
@@ -465,7 +433,7 @@ class FreshRSSClient:
                 ]
                 self._stream_cache[key] = (
                     expires_at,
-                    FreshRSSStreamPage(entries=entries, continuation=page.continuation),
+                    replace(page, entries=entries),
                 )
 
     def _clear_stream_cache(self, *, scope_kind: str | None = None) -> None:

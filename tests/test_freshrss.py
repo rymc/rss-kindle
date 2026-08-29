@@ -1,5 +1,4 @@
 from pathlib import Path
-from threading import Event
 from urllib.parse import urlencode
 
 from app.config import Settings
@@ -8,6 +7,7 @@ from app.freshrss import (
     READING_LIST_STREAM,
     STARRED_STATE,
     FreshRSSClient,
+    FreshRSSError,
     FreshRSSFeed,
     FreshRSSGroup,
     FreshRSSNavigation,
@@ -515,7 +515,9 @@ def test_stream_cache_avoids_refetch_and_removes_items_marked_read():
     assert client.calls == [(READING_LIST_STREAM, None)]
 
 
-def test_expired_stream_cache_serves_stale_page_while_refreshing(monkeypatch):
+def test_expired_stream_cache_refreshes_before_returning_and_falls_back_on_error(
+    monkeypatch,
+):
     monotonic_time = [100.0]
     monkeypatch.setattr("app.freshrss.time.monotonic", lambda: monotonic_time[0])
     settings = Settings(
@@ -547,21 +549,25 @@ def test_expired_stream_cache_serves_stale_page_while_refreshing(monkeypatch):
         "continuation": None,
     }
     monotonic_time[0] = 161.0
-    refresh_finished = Event()
-    refresh_stream_cache = client._refresh_stream_cache
-
-    def refresh_and_signal(*args):
-        refresh_stream_cache(*args)
-        refresh_finished.set()
-
-    client._refresh_stream_cache = refresh_and_signal
-    stale = client.get_stream(scope_kind="home", limit=1)
-
-    assert [entry.id for entry in stale.entries] == ["entry-1"]
-    assert refresh_finished.wait(timeout=1)
     fresh = client.get_stream(scope_kind="home", limit=1)
+
     assert [entry.id for entry in fresh.entries] == ["entry-2"]
+    assert fresh.is_stale is False
     assert client.calls == [
         (READING_LIST_STREAM, None),
         (READING_LIST_STREAM, None),
     ]
+
+    refresh_attempts = []
+
+    def fail_refresh(**kwargs):
+        refresh_attempts.append(kwargs)
+        raise FreshRSSError("FreshRSS is unavailable")
+
+    monotonic_time[0] = 222.0
+    monkeypatch.setattr(client, "_load_stream", fail_refresh)
+    stale = client.get_stream(scope_kind="home", limit=1)
+
+    assert refresh_attempts
+    assert [entry.id for entry in stale.entries] == ["entry-2"]
+    assert stale.is_stale is True
