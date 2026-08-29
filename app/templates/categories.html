@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="category-picker" aria-labelledby="category-picker-title">
+  <h2 id="category-picker-title">Choose a category</h2>
+  <div class="category-choice-grid">
+    <a href="{{ request.url_for('home') }}" class="category-choice">All articles</a>
+    {% for group in groups %}
+    <a href="{{ request.url_for('group_view', slug=group.slug) }}" class="category-choice">{{ group.name }}</a>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

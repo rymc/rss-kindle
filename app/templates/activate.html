@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="login-shell">
+  <div class="login-card">
+    <h2>Pair this device</h2>
+    <p class="login-help">Enter the six-digit code shown on the dashboard.</p>
+
+    {% if error_message %}
+    <p class="notice notice-error">{{ error_message }}</p>
+    {% endif %}
+
+    <form method="post" action="{{ request.url_for('activate_submit') }}" class="login-form">
+      <input type="hidden" name="next_path" value="{{ next_path }}" />
+
+      <label>
+        <span>Pairing code</span>
+        <input type="text" name="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" required />
+      </label>
+
+      <label>
+        <span>Device name</span>
+        <input type="text" name="device_name" value="Kindle" maxlength="80" />
+      </label>
+
+      <button type="submit">Pair device</button>
+    </form>
+
+    <p class="login-alternative"><a href="{{ request.url_for('login_page') }}">Use the backup password</a>.</p>
+  </div>
+</section>
+{% endblock %}

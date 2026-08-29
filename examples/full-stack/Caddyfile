@@ -4,13 +4,16 @@
 
 # Replace these example hostnames with DNS names that resolve to this server.
 freshrss.home.arpa {
+  encode gzip
   reverse_proxy freshrss:80
 }
 
 rss-kindle.home.arpa {
+  encode gzip
   reverse_proxy rss-kindle:8000
 }
 
 :80 {
+  encode gzip
   reverse_proxy rss-kindle:8000
 }

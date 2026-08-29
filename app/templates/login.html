@@ -25,6 +25,10 @@
 
       <button type="submit">Sign in</button>
     </form>
+
+    <p class="login-alternative">
+      Pairing this Kindle? <a href="{{ request.url_for('activate_page') }}{% if next_path != '/' %}?next={{ next_path | urlencode }}{% endif %}">Use a one-time code</a>.
+    </p>
   </div>
 </section>
 {% endblock %}

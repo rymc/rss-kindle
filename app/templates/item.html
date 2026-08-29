@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 
 {% block content %}
-<article class="article-view">
+<a class="article-home-fixed" href="{{ request.url_for('home') }}" data-home-link aria-label="Home" title="Home"><span aria-hidden="true">⌂</span></a>
+<article class="article-view" id="article-start">
   <header class="page-header article-header-compact">
     <h2>{{ entry.title }}</h2>
     <div class="item-meta item-meta-inline article-meta-compact">
@@ -15,30 +16,16 @@
   </div>
 
   <div class="action-row action-row-bottom">
-    {% if previous_item %}
-    <form method="post" action="{{ request.url_for('open_item', entry_id=previous_item.entry_id) }}" class="inline-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <input type="hidden" name="next_path" value="{{ previous_item.detail_url }}" />
-      <button type="submit" class="button-link">Previous</button>
-    </form>
-    {% endif %}
-    {% if next_item %}
-    <form method="post" action="{{ request.url_for('open_item', entry_id=next_item.entry_id) }}" class="inline-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <input type="hidden" name="next_path" value="{{ next_item.detail_url }}" />
-      <button type="submit" class="button-link">Next</button>
-    </form>
-    {% endif %}
     <a class="button-link" href="{{ back_url }}">Back to list</a>
     <form method="post" action="{{ request.url_for(entry.is_starred and 'mark_item_unstarred' or 'mark_item_starred', entry_id=entry.id) }}" class="inline-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_path" value="{{ current_path }}" />
-      <button type="submit">{% if entry.is_starred %}Unstar{% else %}Star{% endif %}</button>
+      <button type="submit" formaction="{{ request.url_for(entry.is_starred and 'mark_item_unstarred' or 'mark_item_starred', entry_id=entry.id) }}" data-quick-action="{% if entry.is_starred %}unstar{% else %}star{% endif %}" class="article-star-button {% if entry.is_starred %}is-active{% endif %}" aria-label="{% if entry.is_starred %}Unstar{% else %}Star{% endif %} this article">{% if entry.is_starred %}★ Unstar{% else %}☆ Star{% endif %}</button>
     </form>
-    <form method="post" action="{{ request.url_for('mark_item_unread', entry_id=entry.id) }}" class="inline-form">
+    <form method="post" action="{{ request.url_for(entry.is_read and 'mark_item_unread' or 'mark_item_read', entry_id=entry.id) }}" class="inline-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_path" value="{{ back_url }}" />
-      <button type="submit">Mark unread</button>
+      <button type="submit">Mark {% if entry.is_read %}unread{% else %}read{% endif %}</button>
     </form>
     {% if entry.url %}
     <p class="article-source-bottom">
@@ -47,4 +34,20 @@
     {% endif %}
   </div>
 </article>
+{% if next_url %}
+<form method="post" action="{{ request.url_for('mark_item_read', entry_id=entry.id) }}" data-article-advance-form hidden>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+  <input type="hidden" name="next_path" value="{{ next_url }}" data-article-next-path />
+</form>
+{% endif %}
+<nav class="page-turn-rails" aria-label="Article page controls" data-page-mode="article" data-page-previous-url="{{ previous_url or '' }}" data-page-next-url="{{ next_url or '' }}" hidden>
+  <button type="button" class="page-turn-rail page-turn-rail-previous" data-page-turn="-1" aria-label="Previous page" title="Previous page">‹</button>
+  <button type="button" class="page-turn-rail page-turn-rail-next" data-page-turn="1" aria-label="Next page" title="Next page">›</button>
+</nav>
+<div class="article-reading-progress" data-reading-progress role="progressbar" aria-label="Article progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+  <span class="article-reading-progress-fill"></span>
+</div>
+<div class="article-end-cue" data-article-end-cue hidden>
+  <strong>End of article</strong>{% if next_url %}<span> · Next: {{ next_title or 'next article' }}</span>{% endif %}
+</div>
 {% endblock %}

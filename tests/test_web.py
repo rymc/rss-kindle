@@ -7,7 +7,15 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.db import Database
-from app.freshrss import FreshRSSEntry, FreshRSSFeed, FreshRSSGroup, FreshRSSNavigation, FreshRSSStreamPage, encode_feed_token
+from app.device_auth import DeviceAuthService
+from app.freshrss import (
+    FreshRSSEntry,
+    FreshRSSFeed,
+    FreshRSSGroup,
+    FreshRSSNavigation,
+    FreshRSSStreamPage,
+    encode_feed_token,
+)
 from app.main import create_app
 from app.repository import Repository
 
@@ -15,13 +23,15 @@ TEST_BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 class FakeFreshRSSClient:
-    def __init__(self, navigation: FreshRSSNavigation, stream_pages: dict[tuple[str, str | None, str | None], FreshRSSStreamPage]):
+    def __init__(
+        self,
+        navigation: FreshRSSNavigation,
+        stream_pages: dict[tuple[str, str | None, str | None], FreshRSSStreamPage],
+    ):
         self.navigation = navigation
         self.stream_pages = stream_pages
         self.entry_map = {
-            entry.id: entry
-            for page in stream_pages.values()
-            for entry in page.entries
+            entry.id: entry for page in stream_pages.values() for entry in page.entries
         }
         self.read_ids: set[str] = set()
         self.starred_ids: set[str] = set()
@@ -29,24 +39,55 @@ class FakeFreshRSSClient:
         self.unread_calls: list[list[str]] = []
         self.star_calls: list[list[str]] = []
         self.unstar_calls: list[list[str]] = []
+        self.navigation_calls = 0
 
     def list_navigation(self):
+        self.navigation_calls += 1
         return self.navigation
 
-    def get_stream(self, *, scope_kind: str, scope_value: str | None = None, continuation: str | None = None, limit: int = 15):
+    def get_stream(
+        self,
+        *,
+        scope_kind: str,
+        scope_value: str | None = None,
+        continuation: str | None = None,
+        limit: int = 15,
+        include_read: bool = False,
+    ):
         page = self.stream_pages[(scope_kind, scope_value, continuation)]
-        unread_entries = [
-            replace(entry, is_starred=entry.id in self.starred_ids)
+        if scope_kind == "starred":
+            entries = [
+                replace(
+                    entry,
+                    is_starred=True,
+                    is_read=entry.id in self.read_ids,
+                )
+                for entry in page.entries
+                if entry.id in self.starred_ids
+            ]
+            return FreshRSSStreamPage(entries=entries, continuation=page.continuation)
+        visible_entries = [
+            replace(
+                entry,
+                is_starred=entry.id in self.starred_ids,
+                is_read=entry.id in self.read_ids,
+            )
             for entry in page.entries
-            if entry.id not in self.read_ids
+            if include_read or entry.id not in self.read_ids
         ]
-        return FreshRSSStreamPage(entries=unread_entries, continuation=page.continuation)
+        return FreshRSSStreamPage(
+            entries=visible_entries, continuation=page.continuation
+        )
 
     def get_entry(self, entry_id: str):
         entry = self.entry_map.get(entry_id)
         if entry is None:
             return None
-        return replace(entry, is_starred=entry_id in self.starred_ids)
+        return replace(
+            entry,
+            is_starred=entry_id in self.starred_ids,
+            is_read=entry_id in self.read_ids,
+        )
 
     def mark_read(self, entry_ids):
         values = [str(entry_id) for entry_id in entry_ids]
@@ -179,32 +220,91 @@ def build_app(tmp_path: Path, **settings_overrides):
     stream_pages = {
         ("home", None, None): FreshRSSStreamPage(
             entries=[
-                make_entry(freshrss_item_id("2"), "Second story", minute=2, feed_token=feed_token),
-                make_entry(freshrss_item_id("1"), "First story", minute=1, feed_token=feed_token),
+                make_entry(
+                    freshrss_item_id("2"),
+                    "Second story",
+                    minute=2,
+                    feed_token=feed_token,
+                ),
+                make_entry(
+                    freshrss_item_id("1"),
+                    "First story",
+                    minute=1,
+                    feed_token=feed_token,
+                ),
             ],
             continuation="page-2",
         ),
         ("home", None, "page-2"): FreshRSSStreamPage(
             entries=[
-                make_entry(freshrss_item_id("4"), "Fourth story", minute=4, feed_token=feed_token),
-                make_entry(freshrss_item_id("3"), "Third story", minute=3, feed_token=feed_token),
+                make_entry(
+                    freshrss_item_id("4"),
+                    "Fourth story",
+                    minute=4,
+                    feed_token=feed_token,
+                ),
+                make_entry(
+                    freshrss_item_id("3"),
+                    "Third story",
+                    minute=3,
+                    feed_token=feed_token,
+                ),
+            ],
+            continuation=None,
+        ),
+        ("starred", None, None): FreshRSSStreamPage(
+            entries=[
+                make_entry(
+                    freshrss_item_id("2"),
+                    "Second story",
+                    minute=2,
+                    feed_token=feed_token,
+                ),
+                make_entry(
+                    freshrss_item_id("1"),
+                    "First story",
+                    minute=1,
+                    feed_token=feed_token,
+                ),
             ],
             continuation=None,
         ),
         ("group", "tech", None): FreshRSSStreamPage(
-            entries=[make_entry(freshrss_item_id("2"), "Second story", minute=2, feed_token=feed_token)],
+            entries=[
+                make_entry(
+                    freshrss_item_id("2"),
+                    "Second story",
+                    minute=2,
+                    feed_token=feed_token,
+                )
+            ],
             continuation=None,
         ),
         ("feed", feed_token, None): FreshRSSStreamPage(
             entries=[
-                make_entry(freshrss_item_id("2"), "Second story", minute=2, feed_token=feed_token),
-                make_entry(freshrss_item_id("1"), "First story", minute=1, feed_token=feed_token),
+                make_entry(
+                    freshrss_item_id("2"),
+                    "Second story",
+                    minute=2,
+                    feed_token=feed_token,
+                ),
+                make_entry(
+                    freshrss_item_id("1"),
+                    "First story",
+                    minute=1,
+                    feed_token=feed_token,
+                ),
             ],
             continuation=None,
         ),
     }
     client = FakeFreshRSSClient(navigation, stream_pages)
-    app = create_app(settings, repository=repository, freshrss_client=client, extractor=FakeExtractor())
+    app = create_app(
+        settings,
+        repository=repository,
+        freshrss_client=client,
+        extractor=FakeExtractor(),
+    )
     return TestClient(app), client, feed_token
 
 
@@ -231,6 +331,22 @@ def extract_form(html: str, button_text: str) -> tuple[str, dict[str, str]]:
     raise AssertionError(f"Could not find form button {button_text!r}")
 
 
+def extract_text_link(html: str, link_text: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    link = next(
+        (
+            candidate
+            for candidate in soup.find_all("a")
+            if candidate.get_text(strip=True) == link_text
+        ),
+        None,
+    )
+    assert link is not None
+    href = link.get("href")
+    assert href
+    return str(href)
+
+
 def test_home_reads_from_freshrss_and_mark_read_hides_item(tmp_path: Path):
     client, freshrss, _ = build_app(tmp_path)
 
@@ -249,12 +365,17 @@ def test_home_reads_from_freshrss_and_mark_read_hides_item(tmp_path: Path):
     assert freshrss.read_calls[-1] == [freshrss_item_id("1")]
 
 
-def test_direct_item_detail_is_safe_but_open_action_marks_read(tmp_path: Path):
+def test_opening_an_article_does_not_mark_it_read_but_advancing_does(
+    tmp_path: Path,
+):
     client, freshrss, _ = build_app(tmp_path)
 
     stream = client.get("/")
-    open_action, open_payload = extract_form(stream.text, "First story")
-    detail_url = open_payload["next_path"]
+    open_url = extract_text_link(stream.text, "First story")
+    detail_url = open_url.rsplit("/", 1)[0]
+
+    assert re.fullmatch(r"/read/g-1/[0-9a-f]{12}", open_url)
+    assert "?" not in open_url
 
     detail = client.get(detail_url)
     assert detail.status_code == 200
@@ -263,9 +384,30 @@ def test_direct_item_detail_is_safe_but_open_action_marks_read(tmp_path: Path):
     assert '<header class="site-header">' not in detail.text
     assert not freshrss.read_calls
 
-    opened = client.post(open_action, data=open_payload, follow_redirects=True)
+    opened = client.get(open_url)
     assert opened.status_code == 200
     assert "Clean body for First story" in opened.text
+    assert not freshrss.read_calls
+
+    opened_soup = BeautifulSoup(opened.text, "html.parser")
+    advance_form = opened_soup.select_one("form[data-article-advance-form]")
+    end_cue = opened_soup.select_one("[data-article-end-cue]")
+    assert advance_form is not None
+    assert end_cue is not None
+    assert "End of article" in end_cue.get_text(" ", strip=True)
+    assert "Fourth story" in end_cue.get_text(" ", strip=True)
+
+    advance = client.post(
+        str(advance_form["action"]),
+        data={
+            input_node.get("name"): input_node.get("value", "")
+            for input_node in advance_form.find_all("input")
+            if input_node.get("name")
+        },
+        follow_redirects=True,
+    )
+    assert advance.status_code == 200
+    assert "Clean body for Fourth story" in advance.text
     assert freshrss.read_calls[-1] == [freshrss_item_id("1")]
 
     unread = client.post(
@@ -278,18 +420,73 @@ def test_direct_item_detail_is_safe_but_open_action_marks_read(tmp_path: Path):
     assert freshrss.unread_calls[-1] == [freshrss_item_id("1")]
 
 
+def test_read_visibility_toggle_shows_read_items_and_preserves_paging(
+    tmp_path: Path,
+):
+    client, _, _ = build_app(tmp_path)
+    entry_id = freshrss_item_id("1")
+    client.post(
+        f"/items/{entry_id}/read",
+        data={"next_path": "/", "csrf_token": ""},
+    )
+
+    unread = client.get("/")
+    assert "First story" not in unread.text
+    unread_soup = BeautifulSoup(unread.text, "html.parser")
+    show_read = unread_soup.select_one("a.read-visibility-toggle")
+    assert show_read is not None
+    assert show_read.get_text(strip=True) == "Show read"
+    assert show_read.get("href") == "/?read=1"
+
+    all_items = client.get("/?read=1")
+    assert all_items.status_code == 200
+    assert "First story" in all_items.text
+    all_soup = BeautifulSoup(all_items.text, "html.parser")
+    hide_read = all_soup.select_one("a.read-visibility-toggle.active")
+    assert hide_read is not None
+    assert hide_read.get_text(strip=True) == "Hide read"
+    assert hide_read.get("href") == "/"
+    assert all_soup.select_one("[data-paged-stream][data-include-read]") is not None
+
+    read_card = next(
+        card
+        for card in all_soup.select("[data-entry-card]")
+        if "First story" in card.get_text(" ", strip=True)
+    )
+    assert "is-read" in read_card.get("class", [])
+    assert "Read" in read_card.get_text(" ", strip=True)
+    assert read_card.select_one('[aria-label="Mark First story as unread"]') is not None
+
+    controls = all_soup.select_one('[data-page-mode="stream"]')
+    assert controls is not None
+    assert "read=1" in str(controls.get("data-page-next-url"))
+
+
+def test_direct_item_detail_does_not_fetch_unused_navigation(tmp_path: Path):
+    client, freshrss, _ = build_app(tmp_path)
+
+    response = client.get(f"/items/{freshrss_item_id('1')}")
+
+    assert response.status_code == 200
+    assert freshrss.navigation_calls == 0
+
+
 def test_next_crosses_page_boundary_when_continuation_exists(tmp_path: Path):
     client, _, _ = build_app(tmp_path)
 
     stream = client.get("/")
-    _, open_payload = extract_form(stream.text, "First story")
-    detail_url = open_payload["next_path"]
+    detail_url = extract_text_link(stream.text, "First story")
     detail = client.get(detail_url)
 
     assert detail.status_code == 200
-    assert "Next" in detail.text
-    _, next_payload = extract_form(detail.text, "Next")
-    assert f"/items/{freshrss_item_id('4')}?ctx=" in next_payload["next_path"]
+    soup = BeautifulSoup(detail.text, "html.parser")
+    controls = soup.select_one('.page-turn-rails[data-page-mode="article"]')
+    assert controls is not None
+    next_url = controls.get("data-page-next-url")
+    assert next_url
+    assert re.fullmatch(r"/read/g-4/[0-9a-f]{12}", str(next_url))
+    assert "?" not in next_url
+    assert soup.select_one(".article-previous, .article-next") is None
 
 
 def test_group_and_feed_filters_use_freshrss_navigation(tmp_path: Path):
@@ -299,11 +496,27 @@ def test_group_and_feed_filters_use_freshrss_navigation(tmp_path: Path):
     assert group_page.status_code == 200
     assert "Second story" in group_page.text
     assert "Tech" in group_page.text
+    group_soup = BeautifulSoup(group_page.text, "html.parser")
+    selected_group = group_soup.select_one("a.category-picker-link.active")
+    assert selected_group is not None
+    assert selected_group.get_text(strip=True) == "Tech"
+    assert str(selected_group.get("href")).endswith("/categories")
 
     feed_page = client.get(f"/feeds/{feed_token}")
     assert feed_page.status_code == 200
     assert "Second story" in feed_page.text
     assert "MacRumors: Mac News and Rumors - Front Page" in feed_page.text
+
+    categories_page = client.get("/categories")
+    assert categories_page.status_code == 200
+    category_soup = BeautifulSoup(categories_page.text, "html.parser")
+    choices = {
+        choice.get_text(strip=True): choice.get("href")
+        for choice in category_soup.select("a.category-choice")
+    }
+    assert set(choices) == {"All articles", "Tech"}
+    assert str(choices["All articles"]).endswith("/")
+    assert str(choices["Tech"]).endswith("/groups/tech")
 
 
 def test_removed_routes_are_gone(tmp_path: Path):
@@ -336,6 +549,116 @@ def test_star_and_unstar_sync_to_freshrss(tmp_path: Path):
     )
     assert unstar.status_code == 200
     assert freshrss.unstar_calls[-1] == [freshrss_item_id("1")]
+
+
+def test_starred_view_includes_saved_read_items(tmp_path: Path):
+    client, _, _ = build_app(tmp_path)
+    entry_id = freshrss_item_id("1")
+
+    client.post(f"/items/{entry_id}/star", data={"next_path": "/", "csrf_token": ""})
+    client.post(f"/items/{entry_id}/read", data={"next_path": "/", "csrf_token": ""})
+
+    response = client.get("/starred")
+
+    assert response.status_code == 200
+    assert "First story" in response.text
+    assert "Second story" not in response.text
+
+
+def test_reader_responses_include_performance_headers_and_lightweight_navigation(
+    tmp_path: Path,
+):
+    client, _, _ = build_app(tmp_path)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "freshrss_stream;dur=" in response.headers["server-timing"]
+    assert "total;dur=" in response.headers["server-timing"]
+    assert response.headers["x-rss-kindle-version"]
+    assert "Browse feeds" not in response.text
+    soup = BeautifulSoup(response.text, "html.parser")
+    category_link = soup.select_one("a.category-picker-link")
+    assert category_link is not None
+    assert category_link.get_text(strip=True) == "Categories"
+    assert str(category_link.get("href")).endswith("/categories")
+    assert soup.select_one("select") is None
+
+
+def test_reader_quick_action_skips_redirect_and_forms_keep_a_normal_fallback(
+    tmp_path: Path,
+):
+    client, freshrss, _ = build_app(tmp_path)
+    response = client.get("/")
+    soup = BeautifulSoup(response.text, "html.parser")
+    first_card = soup.select_one("[data-entry-card]")
+    assert first_card is not None
+    forms = first_card.find_all("form")
+    assert len(forms) == 1
+
+    star_button = first_card.select_one('[data-quick-action="star"]')
+    read_button = first_card.select_one('[data-quick-action="read"]')
+    assert star_button is not None
+    assert read_button is not None
+    assert read_button.get_text(strip=True) == "✓"
+    assert read_button.get("title") == "Mark as read"
+    star_url = star_button.get("formaction")
+    assert star_url
+    payload = {
+        input_node.get("name"): input_node.get("value", "")
+        for input_node in forms[0].find_all("input")
+        if input_node.get("name")
+    }
+
+    quick_response = client.post(
+        str(star_url),
+        data=payload,
+        headers={"X-RSS-Kindle-Action": "1"},
+        follow_redirects=False,
+    )
+
+    assert quick_response.status_code == 204
+    assert "location" not in quick_response.headers
+    assert freshrss.star_calls
+    assert forms[0].get("action", "").endswith("/read")
+
+
+def test_stream_has_progressive_book_style_page_controls(tmp_path: Path):
+    client, _, _ = build_app(tmp_path)
+
+    response = client.get("/")
+    soup = BeautifulSoup(response.text, "html.parser")
+    controls = soup.select_one('.page-turn-rails[hidden][data-page-mode="stream"]')
+
+    assert controls is not None
+    assert [button.get("data-page-turn") for button in controls.find_all("button")] == [
+        "-1",
+        "1",
+    ]
+    assert controls.select_one('[aria-label="Newer articles"]') is not None
+    assert controls.select_one('[aria-label="Older articles"]') is not None
+    assert soup.select_one("[data-stream-page-status]") is not None
+    assert soup.select_one('[data-paged-stream][data-stream-offset="0"]') is not None
+
+
+def test_article_has_cached_script_and_progressive_page_controls(tmp_path: Path):
+    client, _, _ = build_app(tmp_path)
+    response = client.get(f"/items/{freshrss_item_id('1')}")
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    script = soup.find("script", src=re.compile(r"/static/reader\.js\?v="))
+    controls = soup.select_one('.page-turn-rails[hidden][data-page-mode="article"]')
+    progress = soup.select_one('[data-reading-progress][role="progressbar"]')
+    home_link = soup.select_one("a.article-home-fixed")
+
+    assert script is not None
+    assert controls is not None
+    assert len(controls.find_all("button")) == 2
+    assert progress is not None
+    assert progress.get("aria-valuenow") == "0"
+    assert home_link is not None
+    assert str(home_link.get("href")).endswith("/")
+    assert "script-src 'self'" in response.headers["content-security-policy"]
 
 
 def test_auth_redirects_until_login_then_allows_reader_access(tmp_path: Path):
@@ -407,6 +730,184 @@ def test_auth_redirect_preserves_full_return_url(tmp_path: Path):
     assert success.headers["location"] == "/?c=abc&b=def"
 
 
+def test_kindle_can_pair_once_and_use_a_long_lived_device_session(tmp_path: Path):
+    auth_settings = {
+        "app_auth_username": "reader",
+        "app_auth_password": "secret-pass",
+        "app_auth_secret": "test-secret",
+        "app_secure_cookies": False,
+    }
+    client, _, _ = build_app(tmp_path, **auth_settings)
+    settings = build_settings(tmp_path, **auth_settings)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    DeviceAuthService(settings, repository).create_pairing_code(code="123456")
+
+    activation_page = client.get("/activate")
+    assert activation_page.status_code == 200
+    assert "Pair this device" in activation_page.text
+
+    paired = client.post(
+        "/activate",
+        data={"code": "123456", "device_name": "Test Kindle", "next_path": "/"},
+        follow_redirects=False,
+    )
+    assert paired.status_code == 303
+    assert settings.app_device_cookie_name in paired.headers["set-cookie"]
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "Second story" in home.text
+    assert "Test Kindle" not in home.text
+
+    second_use = TestClient(client.app)
+    reused = second_use.post(
+        "/activate",
+        data={"code": "123456", "device_name": "Other Kindle", "next_path": "/"},
+        follow_redirects=False,
+    )
+    assert reused.status_code == 401
+
+
+def test_password_admin_can_pair_and_revoke_a_reader_device(tmp_path: Path):
+    auth_settings = {
+        "app_auth_username": "reader",
+        "app_auth_password": "secret-pass",
+        "app_auth_secret": "test-secret",
+        "app_secure_cookies": False,
+    }
+    admin_client, _, _ = build_app(tmp_path, **auth_settings)
+
+    blocked = admin_client.get("/dashboard", follow_redirects=False)
+    assert blocked.status_code == 303
+    assert blocked.headers["location"] == "/login?next=%2Fdashboard"
+
+    admin_client.post(
+        "/login",
+        data={
+            "username": "reader",
+            "password": "secret-pass",
+            "next_path": "/dashboard",
+        },
+        follow_redirects=False,
+    )
+    legacy = admin_client.get("/admin", follow_redirects=False)
+    assert legacy.status_code == 303
+    assert legacy.headers["location"] == "/dashboard"
+
+    admin = admin_client.get("/dashboard")
+    assert admin.status_code == 200
+    assert "RSS Kindle Dashboard" in admin.text
+    assert "Latest article published:" in admin.text
+    assert "Second story" in admin.text
+    pairing_action, pairing_payload = extract_form(admin.text, "New pairing code")
+
+    pairing = admin_client.post(pairing_action, data=pairing_payload)
+    pairing_soup = BeautifulSoup(pairing.text, "html.parser")
+    pairing_code = pairing_soup.select_one(".pairing-code")
+    assert pairing_code is not None
+    assert re.fullmatch(r"\d{6}", pairing_code.get_text(strip=True))
+
+    kindle_client = TestClient(admin_client.app)
+    activated = kindle_client.post(
+        "/activate",
+        data={
+            "code": pairing_code.get_text(strip=True),
+            "device_name": "Kitchen Kindle",
+            "next_path": "/",
+        },
+        follow_redirects=False,
+    )
+    assert activated.status_code == 303
+    assert kindle_client.get("/").status_code == 200
+    assert (
+        kindle_client.get("/dashboard", follow_redirects=False).headers["location"]
+        == "/login?next=%2Fdashboard"
+    )
+
+    refreshed_admin = admin_client.get("/dashboard")
+    assert "Kitchen Kindle" in refreshed_admin.text
+    revoke_action, revoke_payload = extract_form(refreshed_admin.text, "Revoke")
+    revoked = admin_client.post(revoke_action, data=revoke_payload)
+    assert "Device access was revoked." in revoked.text
+    assert kindle_client.get("/", follow_redirects=False).status_code == 303
+
+
+def test_health_is_public_and_does_not_probe_dependencies(tmp_path: Path):
+    client, _, _ = build_app(
+        tmp_path,
+        app_auth_username="reader",
+        app_auth_password="secret-pass",
+        app_auth_secret="test-secret",
+        app_secure_cookies=False,
+    )
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["version"]
+
+
+def test_health_check_allows_loopback_when_trusted_hosts_are_set(tmp_path: Path):
+    default_client, _, _ = build_app(
+        tmp_path,
+        app_allowed_hosts=("reader.example.com",),
+    )
+    health_client = TestClient(default_client.app, base_url="http://127.0.0.1:8000")
+
+    assert health_client.get("/health").status_code == 200
+
+
+def test_favicon_is_public_and_cacheable(tmp_path: Path):
+    client, _, _ = build_app(
+        tmp_path,
+        app_auth_username="reader",
+        app_auth_password="secret-pass",
+        app_auth_secret="test-secret",
+        app_secure_cookies=False,
+    )
+
+    response = client.get("/favicon.ico")
+
+    assert response.status_code == 204
+    assert "max-age=31536000" in response.headers["cache-control"]
+
+
+def test_password_admin_can_create_and_download_backup(tmp_path: Path):
+    client, _, _ = build_app(
+        tmp_path,
+        app_auth_username="reader",
+        app_auth_password="secret-pass",
+        app_auth_secret="test-secret",
+        app_secure_cookies=False,
+        backup_directory=tmp_path / "backups",
+    )
+    client.post(
+        "/login",
+        data={
+            "username": "reader",
+            "password": "secret-pass",
+            "next_path": "/dashboard",
+        },
+        follow_redirects=False,
+    )
+    admin = client.get("/dashboard")
+    backup_action, backup_payload = extract_form(admin.text, "Create backup")
+
+    created = client.post(backup_action, data=backup_payload)
+
+    assert created.status_code == 200
+    assert "Backup created:" in created.text
+    download_url = extract_link(
+        created.text, r'href="([^"]*rss-kindle-backup-[^"]+\.zip)"'
+    )
+    downloaded = client.get(download_url)
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"] == "application/zip"
+    assert downloaded.content.startswith(b"PK")
+
+
 def test_auth_enabled_routes_require_valid_csrf_token(tmp_path: Path):
     client, freshrss, _ = build_app(
         tmp_path,
@@ -430,10 +931,12 @@ def test_auth_enabled_routes_require_valid_csrf_token(tmp_path: Path):
     assert forbidden.status_code == 403
 
     home = client.get("/")
-    _, open_payload = extract_form(home.text, "First story")
+    soup = BeautifulSoup(home.text, "html.parser")
+    csrf_input = soup.find("input", attrs={"name": "csrf_token"})
+    assert csrf_input is not None
     read_response = client.post(
         f"/items/{freshrss_item_id('1')}/read",
-        data={"next_path": "/", "csrf_token": open_payload["csrf_token"]},
+        data={"next_path": "/", "csrf_token": csrf_input.get("value", "")},
         follow_redirects=False,
     )
     assert read_response.status_code == 303
@@ -479,11 +982,16 @@ def test_home_renders_hacker_news_comments_preview_as_comment_link(tmp_path: Pat
         )
     }
     freshrss = FakeFreshRSSClient(navigation, stream_pages)
-    app = create_app(settings, repository=repository, freshrss_client=freshrss, extractor=FakeExtractor())
+    app = create_app(
+        settings,
+        repository=repository,
+        freshrss_client=freshrss,
+        extractor=FakeExtractor(),
+    )
     client = TestClient(app)
 
     response = client.get("/")
 
     assert response.status_code == 200
     assert f'href="{comments_url}"' in response.text
-    assert '<p>Comments</p>' not in response.text
+    assert "<p>Comments</p>" not in response.text

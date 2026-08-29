@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -50,14 +51,18 @@ class PersistentBrowserClient:
         self._owns_context = False
         self._close_page_on_exit = False
 
-    def __enter__(self) -> PersistentBrowserClient:
+    def __enter__(self) -> Self:
         if self.profile_path is None and not self.cdp_url:
-            raise RuntimeError("browser_profile_path or browser_cdp_url is required for the browser backend")
+            raise RuntimeError(
+                "browser_profile_path or browser_cdp_url is required for the browser backend"
+            )
 
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
-            raise RuntimeError("Browser fetching requires the playwright package. Run `uv sync --extra dev`.") from exc
+            raise RuntimeError(
+                "Browser fetching requires the playwright package. Run `uv sync --extra dev`."
+            ) from exc
 
         self._playwright = sync_playwright().start()
         if self.cdp_url:
@@ -93,7 +98,9 @@ class PersistentBrowserClient:
             **launch_kwargs,
         )
         self._owns_context = True
-        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        self._page = (
+            self._context.pages[0] if self._context.pages else self._context.new_page()
+        )
         self._page.set_default_timeout(int(self.timeout_seconds * 1000))
         return self
 
@@ -140,12 +147,22 @@ class PersistentBrowserClient:
         self._page.set_extra_http_headers(extra_headers)
 
         selected_wait_until = wait_until or self.wait_until
-        selected_wait_for_selector = self.wait_for_selector if wait_for_selector is None else wait_for_selector
-        selected_settle_seconds = self.settle_seconds if settle_seconds is None else settle_seconds
+        selected_wait_for_selector = (
+            self.wait_for_selector if wait_for_selector is None else wait_for_selector
+        )
+        selected_settle_seconds = (
+            self.settle_seconds if settle_seconds is None else settle_seconds
+        )
 
-        response = self._page.goto(url, wait_until=selected_wait_until, timeout=int(self.timeout_seconds * 1000))
+        response = self._page.goto(
+            url,
+            wait_until=selected_wait_until,
+            timeout=int(self.timeout_seconds * 1000),
+        )
         if selected_wait_for_selector:
-            self._page.wait_for_selector(selected_wait_for_selector, timeout=int(self.timeout_seconds * 1000))
+            self._page.wait_for_selector(
+                selected_wait_for_selector, timeout=int(self.timeout_seconds * 1000)
+            )
         if selected_settle_seconds > 0:
             self._page.wait_for_timeout(int(selected_settle_seconds * 1000))
 

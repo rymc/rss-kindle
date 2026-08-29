@@ -1,10 +1,15 @@
-from pathlib import Path
 from datetime import timedelta
+from pathlib import Path
 
 from app.config import Settings
 from app.db import Database
 from app.repository import Repository
-from app.source_bridge import AuthProfile, SourceBridgeService, SourceCatalog, SourceDefinition
+from app.source_bridge import (
+    AuthProfile,
+    SourceBridgeService,
+    SourceCatalog,
+    SourceDefinition,
+)
 from app.utils import utc_now
 
 
@@ -232,11 +237,14 @@ def test_source_bridge_generates_rss_from_ft_homepage_with_auth(tmp_path: Path):
     )
 
     xml = service.build_feed("ft-home")
+    status = service.list_source_status()[0]
 
     assert "<title>FT Front Page</title>" in xml
     assert "<title>Lead story</title>" in xml
     assert "content:encoded" in xml
     assert "World hub" not in xml
+    assert status["latest_article_title"] == "Lead story"
+    assert status["latest_article_at"] == "2026-03-29T08:00:00+00:00"
     assert all(call_headers.get("Cookie") == "session=abc123" for _, call_headers, _ in client.calls)
 
 

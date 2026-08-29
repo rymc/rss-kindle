@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rss-kindle"
-version = "0.1.0"
+version = "0.2.0"
 description = "Kindle-first FreshRSS frontend with cached full-article extraction."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,16 +13,23 @@ dependencies = [
   "fastapi>=0.116.0",
   "httpx>=0.28.1",
   "jinja2>=3.1.6",
-  "playwright>=1.55.0",
   "python-multipart>=0.0.20",
   "readability-lxml>=0.8.1",
   "uvicorn>=0.35.0",
 ]
 
 [project.optional-dependencies]
+browser = [
+  "playwright>=1.55.0",
+]
 dev = [
+  "playwright>=1.55.0",
   "pytest>=8.4.1",
 ]
+
+[project.scripts]
+rss-kindle-benchmark = "app.benchmark:main"
+rss-kindle-browser-benchmark = "app.browser_benchmark:main"
 
 [tool.setuptools]
 packages = ["app"]

@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block content %}
+<header class="admin-header">
+  <div>
+    <h1>RSS Kindle Dashboard</h1>
+    <p>Version {{ app_version }} · uptime {{ status.uptime_seconds }} seconds</p>
+  </div>
+  <a class="button-link" href="{{ request.url_for('home') }}">Reader</a>
+</header>
+
+{% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if error_message %}<p class="notice notice-error">{{ error_message }}</p>{% endif %}
+
+{% if pairing_code %}
+<section class="admin-panel pairing-panel">
+  <h2>One-time pairing code</h2>
+  <p class="pairing-code">{{ pairing_code }}</p>
+  <p>Enter this code on the Kindle. It expires {{ pairing_expires_at|format_relative_time }} and works once.</p>
+</section>
+{% endif %}
+
+<div class="admin-grid">
+  <section class="admin-panel">
+    <h2>FreshRSS</h2>
+    {% if status.freshrss.ok %}
+    <p class="status-good">Connected in {{ status.freshrss.latency_ms }} ms</p>
+    <p>{{ status.freshrss.feed_count }} feeds · {{ status.freshrss.group_count }} groups</p>
+    <p>
+      Last refresh:
+      {% if status.freshrss.last_refreshed_at %}
+      <time datetime="{{ status.freshrss.last_refreshed_at }}" title="{{ status.freshrss.last_refreshed_at|format_datetime }}">{{ status.freshrss.last_refreshed_at|format_relative_time }}</time>
+      {% else %}Not reported{% endif %}
+    </p>
+    <p>
+      Latest article {{ status.freshrss.latest_article_time_kind or "time" }}:
+      {% if status.freshrss.latest_article_at %}
+      <time datetime="{{ status.freshrss.latest_article_at }}" title="{{ status.freshrss.latest_article_at|format_datetime }}">{{ status.freshrss.latest_article_at|format_relative_time }}</time>
+      {% else %}Not reported{% endif %}
+      {% if status.freshrss.latest_article_title %}<br /><small>{{ status.freshrss.latest_article_title }}</small>{% endif %}
+    </p>
+    <p><small>Checked {{ status.freshrss.checked_at|format_relative_time }}.</small></p>
+    {% if status.freshrss.detail_error %}<p><small>Freshness detail unavailable: {{ status.freshrss.detail_error }}</small></p>{% endif %}
+    {% else %}
+    <p class="status-bad">Unavailable after {{ status.freshrss.latency_ms }} ms</p>
+    <p>{{ status.freshrss.error }}</p>
+    {% endif %}
+  </section>
+
+  <section class="admin-panel">
+    <h2>Article cache</h2>
+    <p>{{ status.cache.total_count }} articles · {{ status.cache.success_count }} successful · {{ status.cache.failed_count }} failed</p>
+    <p>{{ status.cache.database_bytes }} bytes on disk</p>
+  </section>
+</div>
+
+<section class="admin-panel">
+  <div class="admin-panel-heading">
+    <h2>Paired devices</h2>
+    <form method="post" action="{{ request.url_for('admin_create_pairing') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit">New pairing code</button>
+    </form>
+  </div>
+  {% if status.devices %}
+  <div class="admin-table-wrap">
+    <table>
+      <thead><tr><th>Device</th><th>Last used</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+      {% for device in status.devices %}
+      <tr>
+        <td>{{ device.name }}</td>
+        <td>{{ device.last_used_at|format_relative_time }}</td>
+        <td>{{ device.expires_at|format_relative_time }}</td>
+        <td>{% if device.revoked_at %}Revoked{% else %}Active{% endif %}</td>
+        <td>
+          {% if not device.revoked_at %}
+          <form method="post" action="{{ request.url_for('admin_revoke_device', device_id=device.device_id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit">Revoke</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p>No paired devices.</p>
+  {% endif %}
+</section>
+
+<section class="admin-panel">
+  <h2>Source bridge</h2>
+  {% if not status.bridge.configured %}
+  <p>Not configured.</p>
+  {% elif not status.bridge.ok %}
+  <p class="status-bad">Unavailable: {{ status.bridge.error }}</p>
+  {% elif status.bridge.sources %}
+  <div class="admin-table-wrap">
+    <table>
+      <thead><tr><th>Source</th><th>Items</th><th>Latest article</th><th>Last refresh</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+      {% for source in status.bridge.sources %}
+      <tr>
+        <td>{{ source.title }}<br /><small>{{ source.id }} · {{ source.fetch_backend }}</small></td>
+        <td>{{ source.item_count }}</td>
+        <td>
+          {% if source.latest_article_at %}<time datetime="{{ source.latest_article_at }}" title="{{ source.latest_article_at|format_datetime }}">{{ source.latest_article_at|format_relative_time }}</time>{% else %}Never{% endif %}
+          {% if source.latest_article_title %}<br /><small>{{ source.latest_article_title }}</small>{% endif %}
+        </td>
+        <td>{% if source.last_successful_at %}<time datetime="{{ source.last_successful_at }}" title="{{ source.last_successful_at|format_datetime }}">{{ source.last_successful_at|format_relative_time }}</time>{% else %}Never{% endif %}</td>
+        <td>{% if source.refreshing %}Refreshing{% elif source.last_error %}{{ source.last_error }}{% else %}Ready{% endif %}</td>
+        <td>
+          <form method="post" action="{{ request.url_for('admin_refresh_bridge_source', source_id=source.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit">Refresh</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p>Connected. No bridge sources are configured.</p>
+  {% endif %}
+</section>
+
+<section class="admin-panel">
+  <div class="admin-panel-heading">
+    <h2>Application backups</h2>
+    <form method="post" action="{{ request.url_for('admin_create_backup') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit">Create backup</button>
+    </form>
+  </div>
+  <p>Retains the latest {{ status.backup.retention_count }} archives in {{ status.backup.directory }}.</p>
+  <p>These archives contain RSS Kindle state and available bridge state. They do not contain FreshRSS data or deployment secrets.</p>
+  {% if status.backup.backups %}
+  <ul>
+    {% for backup in status.backup.backups %}
+    <li><a href="{{ request.url_for('admin_download_backup', filename=backup.filename) }}">{{ backup.filename }}</a> · {{ backup.size_bytes }} bytes</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No application backups yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

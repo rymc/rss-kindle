@@ -9,6 +9,7 @@ from app.source_main import create_app
 class FakeSourceBridge:
     def __init__(self):
         self.schedule_calls: list[float] = []
+        self.refresh_calls: list[str] = []
 
     def list_sources(self):
         return [{"id": "ft-home"}]
@@ -35,6 +36,24 @@ class FakeSourceBridge:
     def schedule_stale_refreshes(self, *, lookahead_seconds: float = 0.0):
         self.schedule_calls.append(lookahead_seconds)
         return []
+
+    def list_source_status(self):
+        return [
+            {
+                "id": "ft-home",
+                "title": "FT Front Page",
+                "fetch_backend": "browser",
+                "item_count": 12,
+                "last_attempted_at": "2026-08-29T10:00:00+00:00",
+                "last_successful_at": "2026-08-29T10:00:00+00:00",
+                "last_error": None,
+                "refreshing": False,
+            }
+        ]
+
+    def schedule_refresh(self, source_id: str):
+        self.refresh_calls.append(source_id)
+        return True
 
 
 def build_settings(tmp_path: Path) -> Settings:
@@ -72,6 +91,12 @@ def test_source_main_requires_token_when_configured(tmp_path: Path):
 
     health = client.get("/health")
     assert health.status_code == 200
+
+    blocked_status = client.get("/status")
+    assert blocked_status.status_code == 401
+
+    allowed_status = client.get("/status", headers={"X-Source-Bridge-Token": "bridge-token"})
+    assert allowed_status.status_code == 200
 
     blocked_feed = client.get("/synthetic/ft-home.xml")
     assert blocked_feed.status_code == 401
@@ -111,6 +136,9 @@ def test_source_main_allows_configured_internal_bridge_host(tmp_path: Path):
     )
     assert allowed_extract.status_code == 200
 
+    health_client = TestClient(app, base_url="http://127.0.0.1:8100")
+    assert health_client.get("/health").status_code == 200
+
     blocked_client = TestClient(app, base_url="http://untrusted.internal:8100")
     blocked_extract = blocked_client.get(
         "/extract",
@@ -134,6 +162,21 @@ def test_source_main_serves_extracted_article_json(tmp_path: Path):
     assert payload["source_id"] == "ft-home"
     assert payload["article_url"] == "https://www.ft.com/content/story-1"
     assert "Body text." in payload["content_html"]
+
+
+def test_source_main_reports_status_and_schedules_manual_refresh(tmp_path: Path):
+    source_bridge = FakeSourceBridge()
+    app = create_app(build_settings(tmp_path), source_bridge=source_bridge)
+    client = TestClient(app)
+
+    status = client.get("/status")
+    refresh = client.post("/sources/ft-home/refresh")
+
+    assert status.status_code == 200
+    assert status.json()[0]["item_count"] == 12
+    assert refresh.status_code == 202
+    assert refresh.json() == {"source_id": "ft-home", "scheduled": True}
+    assert source_bridge.refresh_calls == ["ft-home"]
 
 
 def test_source_main_starts_prewarm_on_startup(tmp_path: Path):
