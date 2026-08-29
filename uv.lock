@@ -652,21 +652,24 @@ wheels = [
 
 [[package]]
 name = "rss-kindle"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jinja2" },
-    { name = "playwright" },
     { name = "python-multipart" },
     { name = "readability-lxml" },
     { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
+browser = [
+    { name = "playwright" },
+]
 dev = [
+    { name = "playwright" },
     { name = "pytest" },
 ]
 
@@ -676,13 +679,14 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jinja2", specifier = ">=3.1.6" },
-    { name = "playwright", specifier = ">=1.55.0" },
+    { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.55.0" },
+    { name = "playwright", marker = "extra == 'dev'", specifier = ">=1.55.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.1" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "readability-lxml", specifier = ">=0.8.1" },
     { name = "uvicorn", specifier = ">=0.35.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["browser", "dev"]
 
 [[package]]
 name = "soupsieve"

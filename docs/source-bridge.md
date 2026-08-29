@@ -27,10 +27,12 @@ At a high level, the bridge:
 
 - `/health`: simple health check
 - `/sources`: list configured source IDs
-- `/synthetic/<source_id>.xml`: synthetic RSS feed endpoint for FreshRSS
+- `/status`: source item counts, refresh state, and the last attempt, success, or error
+- `POST /sources/{source_id}/refresh`: start a manual background refresh; returns `202`
+- `/synthetic/{source_id}.xml`: synthetic RSS feed endpoint for FreshRSS
 - `/extract`: private helper endpoint used by `rss-kindle` for authenticated extraction fallback
 
-When `SOURCE_BRIDGE_ACCESS_TOKEN` is set, `/sources`, `/synthetic/<source_id>.xml`, and `/extract` require either:
+When `SOURCE_BRIDGE_ACCESS_TOKEN` is set, all endpoints except `/health` require either:
 
 - `X-Source-Bridge-Token: <token>`
 - `Authorization: Bearer <token>`
@@ -40,7 +42,7 @@ Treat `/extract` as a private helper endpoint, not a public article proxy.
 
 ## Runtime Model
 
-When FreshRSS requests `/synthetic/<source_id>.xml`, the bridge:
+When FreshRSS requests `/synthetic/{source_id}.xml`, the bridge:
 
 1. checks whether cached feed data is still fresh
 2. serves cached content immediately when it can
@@ -64,7 +66,7 @@ docker compose up --build -d source-bridge
 FreshRSS can then subscribe to:
 
 ```text
-http://<host>:8100/synthetic/<source_id>.xml
+http://<host>:8100/synthetic/{source_id}.xml
 ```
 
 ### Local Development
@@ -203,7 +205,7 @@ If a browser-backed source looks stale or wrong, test the same profile headful f
 | `SOURCE_BRIDGE_ACCESS_TOKEN` | no | optional shared token for protecting bridge endpoints | unset |
 | `APP_ALLOWED_HOSTS` | no | comma-separated hostnames allowed by the bridge | unset |
 | `HTTP_TIMEOUT_SECONDS` | no | outbound HTTP timeout | `20` |
-| `USER_AGENT` | no | outbound user agent for HTTP fetching | `rss-kindle/0.1 (+https://example.invalid; self-hosted personal reader)` |
+| `USER_AGENT` | no | outbound user agent for HTTP fetching | `rss-kindle/0.2 (+https://example.invalid; self-hosted personal reader)` |
 
 ## Security And Privacy
 

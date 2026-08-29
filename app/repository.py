@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 from dataclasses import dataclass
 
 from app.db import Database
@@ -39,12 +41,218 @@ class SyntheticFeedItem:
     discovered_at: str
 
 
+@dataclass(frozen=True)
+class ReaderDevice:
+    device_id: str
+    name: str
+    created_at: str
+    last_used_at: str
+    expires_at: str
+    revoked_at: str | None
+
+
+@dataclass(frozen=True)
+class ArticleCacheStats:
+    total_count: int
+    success_count: int
+    failed_count: int
+    database_bytes: int
+
+
 class Repository:
     def __init__(self, database: Database):
         self.database = database
 
     def initialize(self) -> None:
         self.database.initialize()
+
+    def set_pairing_code(
+        self,
+        *,
+        code_hash: str,
+        created_at: str,
+        expires_at: str,
+        attempts_remaining: int,
+    ) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO reader_pairing (
+                    singleton_id, code_hash, created_at, expires_at, attempts_remaining
+                )
+                VALUES (1, ?, ?, ?, ?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    code_hash = excluded.code_hash,
+                    created_at = excluded.created_at,
+                    expires_at = excluded.expires_at,
+                    attempts_remaining = excluded.attempts_remaining
+                """,
+                (code_hash, created_at, expires_at, attempts_remaining),
+            )
+            connection.commit()
+
+    def consume_pairing_code(self, *, code_hash: str, now: str) -> bool:
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT code_hash, expires_at, attempts_remaining
+                FROM reader_pairing
+                WHERE singleton_id = 1
+                """
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return False
+            if row["expires_at"] <= now or row["attempts_remaining"] <= 0:
+                connection.execute("DELETE FROM reader_pairing WHERE singleton_id = 1")
+                connection.commit()
+                return False
+            if not hmac.compare_digest(row["code_hash"], code_hash):
+                attempts_remaining = row["attempts_remaining"] - 1
+                if attempts_remaining <= 0:
+                    connection.execute("DELETE FROM reader_pairing WHERE singleton_id = 1")
+                else:
+                    connection.execute(
+                        "UPDATE reader_pairing SET attempts_remaining = ? WHERE singleton_id = 1",
+                        (attempts_remaining,),
+                    )
+                connection.commit()
+                return False
+            connection.execute("DELETE FROM reader_pairing WHERE singleton_id = 1")
+            connection.commit()
+            return True
+
+    def create_reader_device(
+        self,
+        *,
+        device_id: str,
+        name: str,
+        token_hash: str,
+        created_at: str,
+        expires_at: str,
+    ) -> ReaderDevice:
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO reader_devices (
+                    device_id, name, token_hash, created_at, last_used_at, expires_at, revoked_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (device_id, name, token_hash, created_at, created_at, expires_at),
+            )
+            connection.commit()
+        return ReaderDevice(
+            device_id=device_id,
+            name=name,
+            created_at=created_at,
+            last_used_at=created_at,
+            expires_at=expires_at,
+            revoked_at=None,
+        )
+
+    def get_reader_device_by_token_hash(self, token_hash: str, *, now: str) -> ReaderDevice | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT device_id, name, created_at, last_used_at, expires_at, revoked_at
+                FROM reader_devices
+                WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?
+                """,
+                (token_hash, now),
+            ).fetchone()
+        return ReaderDevice(**dict(row)) if row is not None else None
+
+    def touch_reader_device(self, device_id: str, *, used_at: str, older_than: str) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE reader_devices
+                SET last_used_at = ?
+                WHERE device_id = ? AND last_used_at < ?
+                """,
+                (used_at, device_id, older_than),
+            )
+            connection.commit()
+
+    def list_reader_devices(self) -> list[ReaderDevice]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT device_id, name, created_at, last_used_at, expires_at, revoked_at
+                FROM reader_devices
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        return [ReaderDevice(**dict(row)) for row in rows]
+
+    def revoke_reader_device(self, device_id: str, *, revoked_at: str) -> bool:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE reader_devices
+                SET revoked_at = ?
+                WHERE device_id = ? AND revoked_at IS NULL
+                """,
+                (revoked_at, device_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def save_reading_context(self, payload: str) -> str:
+        context_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+        saved_at = utc_now_iso()
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO reading_contexts (context_id, payload, saved_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(context_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    saved_at = excluded.saved_at
+                """,
+                (context_id, payload, saved_at),
+            )
+            connection.execute(
+                """
+                DELETE FROM reading_contexts
+                WHERE context_id NOT IN (
+                    SELECT context_id
+                    FROM reading_contexts
+                    ORDER BY saved_at DESC
+                    LIMIT 256
+                )
+                """
+            )
+            connection.commit()
+        return context_id
+
+    def get_reading_context(self, context_id: str) -> str | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM reading_contexts WHERE context_id = ?",
+                (context_id,),
+            ).fetchone()
+        return str(row["payload"]) if row is not None else None
+
+    def get_article_cache_stats(self) -> ArticleCacheStats:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_count,
+                    SUM(CASE WHEN extraction_status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                    SUM(CASE WHEN extraction_status != 'success' THEN 1 ELSE 0 END) AS failed_count
+                FROM article_cache
+                """
+            ).fetchone()
+        return ArticleCacheStats(
+            total_count=int(row["total_count"] or 0),
+            success_count=int(row["success_count"] or 0),
+            failed_count=int(row["failed_count"] or 0),
+            database_bytes=self.database.path.stat().st_size if self.database.path.exists() else 0,
+        )
 
     def get_cached_article(self, entry_id: str, source_url: str | None) -> CachedArticle | None:
         normalized_url = (source_url or "").strip()
@@ -154,6 +362,14 @@ class Repository:
         with self.database.connect() as connection:
             rows = connection.execute(query, params).fetchall()
         return [SyntheticFeedItem(**dict(row)) for row in rows]
+
+    def count_synthetic_feed_items(self, source_id: str) -> int:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS item_count FROM synthetic_feed_items WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+        return int(row["item_count"] or 0)
 
     def replace_synthetic_feed_items(self, source_id: str, items: list[SyntheticFeedItem]) -> None:
         refreshed_at = utc_now_iso()

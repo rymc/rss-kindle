@@ -1,12 +1,31 @@
-x-app-image: &app-image
+x-app-common: &app-common
+  user: "${RSS_KINDLE_UID:-1000}:${RSS_KINDLE_GID:-1000}"
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  restart: unless-stopped
+
+x-reader-image: &reader-image
+  <<: *app-common
   build:
     context: ../..
+    target: reader
   image: rss-kindle:latest
-  restart: unless-stopped
+
+x-browser-image: &browser-image
+  <<: *app-common
+  build:
+    context: ../..
+    target: browser
+  image: rss-kindle-browser:latest
 
 services:
   rss-kindle:
-    <<: *app-image
+    <<: *reader-image
     container_name: rss-kindle
     command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     expose:
@@ -21,19 +40,35 @@ services:
       APP_AUTH_USERNAME: ${APP_AUTH_USERNAME:-}
       APP_AUTH_PASSWORD: ${APP_AUTH_PASSWORD:-}
       APP_AUTH_SECRET: ${APP_AUTH_SECRET:-}
+      APP_SESSION_COOKIE_NAME: ${APP_SESSION_COOKIE_NAME:-rss_kindle_session}
+      APP_SESSION_MAX_AGE_SECONDS: ${APP_SESSION_MAX_AGE_SECONDS:-2592000}
       APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-true}
       APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
       SOURCE_BRIDGE_API_URL: ${SOURCE_BRIDGE_API_URL:-http://source-bridge:8100}
       SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
       MAX_STREAM_ITEMS: ${MAX_STREAM_ITEMS:-15}
       METADATA_CACHE_SECONDS: ${METADATA_CACHE_SECONDS:-60}
+      ENTRY_CACHE_SECONDS: ${ENTRY_CACHE_SECONDS:-300}
+      ARTICLE_PREWARM_COUNT: ${ARTICLE_PREWARM_COUNT:-2}
       HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-20}
-      USER_AGENT: ${USER_AGENT:-rss-kindle/0.1 (+https://example.invalid; self-hosted personal reader)}
+      USER_AGENT: ${USER_AGENT:-rss-kindle/0.2 (+https://example.invalid; self-hosted personal reader)}
+      APP_DEVICE_COOKIE_NAME: ${APP_DEVICE_COOKIE_NAME:-rss_kindle_device}
+      DEVICE_SESSION_MAX_AGE_SECONDS: ${DEVICE_SESSION_MAX_AGE_SECONDS:-31536000}
+      PAIRING_CODE_TTL_SECONDS: ${PAIRING_CODE_TTL_SECONDS:-600}
+      PAIRING_CODE_ATTEMPTS: ${PAIRING_CODE_ATTEMPTS:-5}
+      BACKUP_DIRECTORY: ${BACKUP_DIRECTORY:-/app/data/backups}
+      BACKUP_RETENTION_COUNT: ${BACKUP_RETENTION_COUNT:-7}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - rss-kindle
 
   source-bridge:
-    <<: *app-image
+    <<: *browser-image
     container_name: rss-kindle-source-bridge
     command: ["uvicorn", "app.source_main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8100"]
     expose:
@@ -48,8 +83,16 @@ services:
       SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
       APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
       SOURCE_BRIDGE_REFRESH_SECONDS: ${SOURCE_BRIDGE_REFRESH_SECONDS:-900}
+      SOURCE_BRIDGE_PREWARM_ENABLED: ${SOURCE_BRIDGE_PREWARM_ENABLED:-true}
+      SOURCE_BRIDGE_PREWARM_INTERVAL_SECONDS: ${SOURCE_BRIDGE_PREWARM_INTERVAL_SECONDS:-60}
       HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-20}
-      USER_AGENT: ${USER_AGENT:-rss-kindle/0.1 (+https://example.invalid; self-hosted personal reader)}
+      USER_AGENT: ${USER_AGENT:-rss-kindle/0.2 (+https://example.invalid; self-hosted personal reader)}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - rss-kindle
 

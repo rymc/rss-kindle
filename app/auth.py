@@ -29,6 +29,7 @@ def issue_session_token(
         "sub": username,
         "csrf": csrf_token or secrets.token_urlsafe(24),
         "exp": int(time.time()) + max_age_seconds,
+        "auth_type": "password",
     }
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     signature = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
@@ -64,7 +65,13 @@ def decode_session_token(token: str | None, *, secret: str) -> dict[str, Any] | 
         return None
     if expires_at < int(time.time()):
         return None
-    return {"sub": username, "csrf": csrf_token, "exp": expires_at}
+    auth_type = payload.get("auth_type")
+    return {
+        "sub": username,
+        "csrf": csrf_token,
+        "exp": expires_at,
+        "auth_type": auth_type if auth_type in {"password", "device"} else "password",
+    }
 
 
 def validate_csrf(session_payload: dict[str, Any] | None, submitted_token: str | None) -> bool:

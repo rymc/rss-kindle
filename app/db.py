@@ -5,7 +5,6 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
@@ -45,9 +44,46 @@ CREATE TABLE IF NOT EXISTS synthetic_feed_items (
 
 CREATE INDEX IF NOT EXISTS idx_synthetic_feed_items_source_sort
 ON synthetic_feed_items(source_id, sort_index ASC, discovered_at DESC);
+
+CREATE TABLE IF NOT EXISTS reader_pairing (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    code_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    attempts_remaining INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reader_devices (
+    device_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reader_devices_token_hash
+ON reader_devices(token_hash);
+
+CREATE TABLE IF NOT EXISTS reading_contexts (
+    context_id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    saved_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reading_contexts_saved_at
+ON reading_contexts(saved_at DESC);
 """
 
-CURRENT_TABLES = {"article_cache", "synthetic_source_state", "synthetic_feed_items"}
+CURRENT_TABLES = {
+    "article_cache",
+    "synthetic_source_state",
+    "synthetic_feed_items",
+    "reader_pairing",
+    "reader_devices",
+    "reading_contexts",
+}
 
 
 class Database:

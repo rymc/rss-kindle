@@ -1,13 +1,12 @@
 from datetime import UTC, datetime
 
+from app.article_html import cleanup_kindle_article_html, simplify_html_for_kindle
 from app.utils import (
-    cleanup_kindle_article_html,
     compact_source_label,
     extract_hacker_news_comments_url,
     format_relative_time,
     is_comments_only_summary,
     is_kindle_user_agent,
-    simplify_html_for_kindle,
 )
 
 

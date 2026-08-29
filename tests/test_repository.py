@@ -21,6 +21,20 @@ def test_initialize_replaces_legacy_schema_with_cache_schema(tmp_path: Path):
             if not row[0].startswith("sqlite_")
         }
 
-    assert tables == {"article_cache", "synthetic_source_state", "synthetic_feed_items"}
+    assert {"article_cache", "synthetic_source_state", "synthetic_feed_items"} <= tables
+    assert "feeds" not in tables
     backups = list(tmp_path.glob("rss.legacy-*.db"))
     assert len(backups) == 1
+
+
+def test_reading_context_has_a_short_stable_id_and_round_trips(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "rss.db"))
+    repository.initialize()
+
+    first_id = repository.save_reading_context("encoded reading context")
+    second_id = repository.save_reading_context("encoded reading context")
+
+    assert first_id == second_id
+    assert len(first_id) == 12
+    assert repository.get_reading_context(first_id) == "encoded reading context"
+    assert repository.get_reading_context("missing") is None

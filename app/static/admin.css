@@ -1,0 +1,65 @@
+.admin-header,
+.admin-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.admin-header {
+  margin-bottom: 1rem;
+  border-bottom: 2px solid #111;
+}
+
+.admin-header h1,
+.admin-panel h2 {
+  margin: 0;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.75rem;
+}
+
+.admin-panel {
+  margin-bottom: 0.75rem;
+  padding: 0.85rem;
+  border: 1px solid #111;
+}
+
+.pairing-panel {
+  text-align: center;
+}
+
+.pairing-code {
+  margin: 0.4rem 0;
+  font: bold 2.2rem/1.2 monospace;
+  letter-spacing: 0.25rem;
+}
+
+.status-good {
+  font-weight: bold;
+}
+
+.status-bad {
+  font-weight: bold;
+  color: #800;
+}
+
+.admin-table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.4rem;
+  border-bottom: 1px solid #bbb;
+  text-align: left;
+  vertical-align: top;
+}
