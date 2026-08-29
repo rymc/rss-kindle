@@ -375,6 +375,7 @@ class ReaderController:
                     else None
                 ),
                 "stream_context": page_title if scope.kind != "home" else None,
+                "stream_is_stale": page.is_stale,
                 "empty_message": (
                     "No saved items in this view."
                     if scope.kind == "starred"

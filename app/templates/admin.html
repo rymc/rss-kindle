@@ -27,7 +27,7 @@
     <p class="status-good">Connected in {{ status.freshrss.latency_ms }} ms</p>
     <p>{{ status.freshrss.feed_count }} feeds · {{ status.freshrss.group_count }} groups</p>
     <p>
-      Last refresh:
+      Oldest feed refresh:
       {% if status.freshrss.last_refreshed_at %}
       <time datetime="{{ status.freshrss.last_refreshed_at }}" title="{{ status.freshrss.last_refreshed_at|format_datetime }}">{{ status.freshrss.last_refreshed_at|format_relative_time }}</time>
       {% else %}Not reported{% endif %}

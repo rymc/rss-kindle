@@ -65,7 +65,7 @@ class FakeFreshRSSClient:
                 for entry in page.entries
                 if entry.id in self.starred_ids
             ]
-            return FreshRSSStreamPage(entries=entries, continuation=page.continuation)
+            return replace(page, entries=entries)
         visible_entries = [
             replace(
                 entry,
@@ -75,9 +75,7 @@ class FakeFreshRSSClient:
             for entry in page.entries
             if include_read or entry.id not in self.read_ids
         ]
-        return FreshRSSStreamPage(
-            entries=visible_entries, continuation=page.continuation
-        )
+        return replace(page, entries=visible_entries)
 
     def get_entry(self, entry_id: str):
         entry = self.entry_map.get(entry_id)
@@ -363,6 +361,21 @@ def test_home_reads_from_freshrss_and_mark_read_hides_item(tmp_path: Path):
     assert hide.status_code == 200
     assert "First story" not in hide.text
     assert freshrss.read_calls[-1] == [freshrss_item_id("1")]
+
+
+def test_home_warns_when_freshrss_refresh_falls_back_to_cached_articles(
+    tmp_path: Path,
+):
+    client, freshrss, _ = build_app(tmp_path)
+    page_key = ("home", None, None)
+    freshrss.stream_pages[page_key] = replace(
+        freshrss.stream_pages[page_key], is_stale=True
+    )
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "FreshRSS unavailable · showing cached articles" in response.text
 
 
 def test_opening_an_article_does_not_mark_it_read_but_advancing_does(
@@ -798,6 +811,7 @@ def test_password_admin_can_pair_and_revoke_a_reader_device(tmp_path: Path):
     admin = admin_client.get("/dashboard")
     assert admin.status_code == 200
     assert "RSS Kindle Dashboard" in admin.text
+    assert "Oldest feed refresh:" in admin.text
     assert "Latest article published:" in admin.text
     assert "Second story" in admin.text
     pairing_action, pairing_payload = extract_form(admin.text, "New pairing code")
