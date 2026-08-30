@@ -363,6 +363,7 @@ class ReaderController:
             page_title=document_title,
             active_group_slug=active_group_slug,
             active_feed_id=active_feed_id,
+            reader_script=True,
         )
         context.update(
             {
@@ -453,6 +454,7 @@ class ReaderController:
             page_title=entry.title,
             active_feed_id=entry.feed_token,
             show_site_header=False,
+            reader_script=True,
         )
         context.update(
             {

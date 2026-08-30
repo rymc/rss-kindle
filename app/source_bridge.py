@@ -6,7 +6,8 @@ import re
 import threading
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from email.utils import format_datetime
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from app.utils import (
 CONTENT_NAMESPACE = "http://purl.org/rss/1.0/modules/content/"
 ET.register_namespace("content", CONTENT_NAMESPACE)
 logger = logging.getLogger(__name__)
+DEFAULT_BROWSER_CONCURRENCY = 2
 
 
 @dataclass(frozen=True)
@@ -78,7 +80,10 @@ class SourceBridgeService:
         client_factory: Callable[[], Any] | None = None,
         browser_client_factory: Callable[[SourceDefinition, AuthProfile], Any]
         | None = None,
+        browser_concurrency: int = DEFAULT_BROWSER_CONCURRENCY,
     ):
+        if browser_concurrency < 1:
+            raise ValueError("browser_concurrency must be at least 1")
         self.settings = settings
         self.repository = repository
         self.catalog = catalog or SourceCatalog.load(settings.source_bridge_config_path)
@@ -88,6 +93,14 @@ class SourceBridgeService:
         )
         self._active_background_refreshes: set[str] = set()
         self._active_background_refreshes_lock = threading.Lock()
+        self._source_refresh_locks = {
+            source_id: threading.Lock() for source_id in self.catalog.sources
+        }
+        self._browser_profile_locks = {
+            profile_name: threading.Lock()
+            for profile_name in self.catalog.auth_profiles
+        }
+        self._browser_slots = threading.BoundedSemaphore(browser_concurrency)
 
     def _default_client_factory(self) -> httpx.Client:
         return httpx.Client(
@@ -170,7 +183,7 @@ class SourceBridgeService:
                 self._schedule_background_refresh(source_id)
             else:
                 try:
-                    items = self.refresh_source(source_id)
+                    items = self._refresh_source_if_needed(source)
                 except Exception as exc:
                     if not items:
                         raise SourceBridgeError(str(exc)) from exc
@@ -206,12 +219,45 @@ class SourceBridgeService:
 
     def refresh_source(self, source_id: str) -> list[SyntheticFeedItem]:
         source = self.get_source(source_id)
+        with self._source_refresh_locks[source_id]:
+            return self._refresh_source_locked(source)
+
+    def _refresh_source_if_needed(
+        self, source: SourceDefinition
+    ) -> list[SyntheticFeedItem]:
+        with self._source_refresh_locks[source.source_id]:
+            cached_items = self.repository.list_synthetic_feed_items(
+                source.source_id, limit=source.max_items
+            )
+            if not self._source_needs_refresh(source, cached_items):
+                return cached_items
+            return self._refresh_source_locked(source, cached_items=cached_items)
+
+    def _refresh_source_locked(
+        self,
+        source: SourceDefinition,
+        *,
+        cached_items: list[SyntheticFeedItem] | None = None,
+    ) -> list[SyntheticFeedItem]:
+        source_id = source.source_id
+        if cached_items is None:
+            cached_items = self.repository.list_synthetic_feed_items(
+                source_id, limit=source.max_items
+            )
         snapshot_time = utc_now_iso()
         try:
             with self._open_client(source) as client:
                 candidates = self._discover_links(client, source)
+                if not candidates and cached_items:
+                    raise SourceBridgeError(
+                        "Discovery returned no matching articles; keeping the cached feed."
+                    )
                 items = self._build_items(
-                    client, source, candidates, snapshot_time=snapshot_time
+                    client,
+                    source,
+                    candidates,
+                    snapshot_time=snapshot_time,
+                    cached_items=cached_items,
                 )
         except Exception as exc:
             self.repository.mark_synthetic_source_failure(source_id, str(exc))
@@ -338,7 +384,7 @@ class SourceBridgeService:
         age_seconds = (utc_now() - reference_time).total_seconds()
         if age_seconds + max(0.0, lookahead_seconds) >= refresh_seconds:
             return True
-        return not cached_items
+        return not cached_items and state.last_successful_at is None
 
     def _match_source_for_article_url(
         self, article_url: str
@@ -377,11 +423,20 @@ class SourceBridgeService:
         ranked_matches.sort(key=lambda item: (-item[0], item[1].source_id))
         return ranked_matches[0][1]
 
+    @contextmanager
     def _open_client(self, source: SourceDefinition) -> Any:
         if source.fetch_backend == "browser":
             profile = self._get_browser_profile(source)
-            return self.browser_client_factory(source, profile)
-        return self.client_factory()
+            profile_lock = self._browser_profile_locks[profile.name]
+            with (
+                profile_lock,
+                self._browser_slots,
+                self.browser_client_factory(source, profile) as client,
+            ):
+                yield client
+            return
+        with self.client_factory() as client:
+            yield client
 
     def _get_browser_profile(self, source: SourceDefinition) -> AuthProfile:
         if not source.auth_profile:
@@ -454,17 +509,36 @@ class SourceBridgeService:
         candidates: list[DiscoveredLink],
         *,
         snapshot_time: str,
+        cached_items: list[SyntheticFeedItem] | None = None,
     ) -> list[SyntheticFeedItem]:
         items: list[SyntheticFeedItem] = []
-        for candidate in candidates:
+        cached_by_id = {
+            item.item_id: item for item in (cached_items or [])
+        }
+        for candidate_index, candidate in enumerate(candidates):
             if len(items) >= source.max_items:
                 break
+            cached_item = cached_by_id.get(stable_hash(candidate.url))
+            if (
+                candidate_index > 0
+                and cached_item is not None
+                and cached_item.content_html
+            ):
+                items.append(
+                    replace(
+                        cached_item,
+                        source_page_url=candidate.source_page_url,
+                        sort_index=len(items),
+                    )
+                )
+                continue
             item = self._build_item_from_candidate(
                 client,
                 source,
                 candidate,
                 sort_index=len(items),
                 snapshot_time=snapshot_time,
+                cached_item=cached_item,
             )
             if item is not None:
                 items.append(item)
@@ -478,13 +552,26 @@ class SourceBridgeService:
         *,
         sort_index: int,
         snapshot_time: str,
+        cached_item: SyntheticFeedItem | None = None,
     ) -> SyntheticFeedItem | None:
         try:
             page_html = self._fetch_text(client, candidate.url, source)
             title, content_html, summary_text, published_at = _extract_article_payload(
                 page_html, candidate.title, candidate.url
             )
+            if not content_html and cached_item is not None and cached_item.content_html:
+                return replace(
+                    cached_item,
+                    source_page_url=candidate.source_page_url,
+                    sort_index=sort_index,
+                )
         except Exception:  # noqa: BLE001 - one bad article must not discard the feed snapshot
+            if cached_item is not None and cached_item.content_html:
+                return replace(
+                    cached_item,
+                    source_page_url=candidate.source_page_url,
+                    sort_index=sort_index,
+                )
             fallback_title = candidate.title or candidate.url
             return SyntheticFeedItem(
                 source_id=source.source_id,

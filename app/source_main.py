@@ -24,6 +24,10 @@ def create_app(
     source_bridge: SourceBridgeService | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
+    if not settings.source_bridge_access_token:
+        raise RuntimeError(
+            "SOURCE_BRIDGE_ACCESS_TOKEN is required to start the source bridge."
+        )
     repository = repository or Repository(Database(settings.database_path))
     repository.initialize()
     source_bridge = source_bridge or SourceBridgeService(settings, repository)
@@ -108,6 +112,3 @@ def _allowed_hosts(settings: Settings) -> list[str]:
             if host not in allowed_hosts:
                 allowed_hosts.append(host)
     return allowed_hosts
-
-
-app = create_app()

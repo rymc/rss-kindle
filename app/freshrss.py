@@ -22,6 +22,8 @@ STARRED_STATE = "user/-/state/com.google/starred"
 READING_LIST_STREAM = "reading-list"
 GROUP_CONTINUATION_PREFIX = "group-offset:"
 SORTED_CONTINUATION_PREFIX = "sorted-offset:"
+STREAM_PAGE_CACHE_LIMIT = 64
+STREAM_SCAN_CACHE_ENTRY_BUDGET = 512
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,20 @@ class FreshRSSNavigation:
     feeds: list[FreshRSSFeed]
 
 
+@dataclass
+class _StreamScanSnapshot:
+    expires_at: float
+    entries: list[FreshRSSEntry]
+    continuation: str | None
+    complete: bool
+
+
+@dataclass
+class _StreamRefreshState:
+    lock: threading.Lock
+    users: int = 0
+
+
 def normalize_freshrss_api_url(value: str) -> str:
     raw = value.strip()
     if not raw:
@@ -132,13 +148,24 @@ class FreshRSSClient:
             None if client_factory is not None else self._default_client_factory()
         )
         self._lock = threading.Lock()
+        self._navigation_refresh_lock = threading.Lock()
+        self._stream_refresh_states: dict[
+            tuple[str, str, str | None, bool], _StreamRefreshState
+        ] = {}
         self._auth_token: str | None = None
         self._write_token: str | None = None
         self._navigation_cache: tuple[float, FreshRSSNavigation] | None = None
+        self._navigation_retry_after = 0.0
         self._entry_cache: dict[str, tuple[float, FreshRSSEntry]] = {}
         self._stream_cache: dict[
             tuple[str, str | None, str | None, int, bool],
             tuple[float, FreshRSSStreamPage],
+        ] = {}
+        self._stream_retry_after: dict[
+            tuple[str, str | None, str | None, int, bool], float
+        ] = {}
+        self._stream_scan_cache: dict[
+            tuple[str, bool], _StreamScanSnapshot
         ] = {}
         self._stream_cache_generation = 0
 
@@ -161,24 +188,71 @@ class FreshRSSClient:
         if self._shared_client is not None:
             self._shared_client.close()
 
+    @contextmanager
+    def _stream_singleflight(
+        self, key: tuple[str, str, str | None, bool]
+    ):
+        with self._lock:
+            state = self._stream_refresh_states.get(key)
+            if state is None:
+                state = _StreamRefreshState(lock=threading.Lock())
+                self._stream_refresh_states[key] = state
+            state.users += 1
+        try:
+            with state.lock:
+                yield
+        finally:
+            with self._lock:
+                state.users -= 1
+                if (
+                    state.users == 0
+                    and self._stream_refresh_states.get(key) is state
+                ):
+                    self._stream_refresh_states.pop(key, None)
+
     def list_navigation(self, force_refresh: bool = False) -> FreshRSSNavigation:
+        now = time.monotonic()
         with self._lock:
             cached = self._navigation_cache
-            if not force_refresh and cached and cached[0] > time.monotonic():
+            retry_after = self._navigation_retry_after
+            if not force_refresh and cached and (
+                cached[0] > now or retry_after > now
+            ):
                 return cached[1]
 
-        payload = self._request_json(
-            "GET",
-            "/reader/api/0/subscription/list",
-            params={"output": "json"},
-        )
-        navigation = parse_navigation(payload)
-        with self._lock:
-            self._navigation_cache = (
-                time.monotonic() + self.settings.metadata_cache_seconds,
-                navigation,
-            )
-        return navigation
+        with self._navigation_refresh_lock:
+            now = time.monotonic()
+            with self._lock:
+                cached = self._navigation_cache
+                retry_after = self._navigation_retry_after
+                if not force_refresh and cached and (
+                    cached[0] > now or retry_after > now
+                ):
+                    return cached[1]
+            try:
+                payload = self._request_json(
+                    "GET",
+                    "/reader/api/0/subscription/list",
+                    params={"output": "json"},
+                )
+                navigation = parse_navigation(payload)
+            except (FreshRSSError, httpx.HTTPError, ValueError):
+                if cached is None or force_refresh:
+                    raise
+                logger.warning(
+                    "FreshRSS navigation refresh failed; serving the expired cache",
+                    exc_info=True,
+                )
+                with self._lock:
+                    self._navigation_retry_after = time.monotonic() + 5
+                return cached[1]
+            with self._lock:
+                self._navigation_cache = (
+                    time.monotonic() + self.settings.metadata_cache_seconds,
+                    navigation,
+                )
+                self._navigation_retry_after = 0.0
+            return navigation
 
     def get_stream(
         self,
@@ -191,34 +265,57 @@ class FreshRSSClient:
     ) -> FreshRSSStreamPage:
         include_read = include_read or scope_kind == "starred"
         cache_key = (scope_kind, scope_value, continuation, limit, include_read)
+        refresh_key = ("request", scope_kind, scope_value, include_read)
         now = time.monotonic()
         cache_generation = 0
         cached: tuple[float, FreshRSSStreamPage] | None = None
         if self.settings.stream_cache_seconds > 0:
             with self._lock:
+                self._prune_stream_retry_after_locked(now)
                 cache_generation = self._stream_cache_generation
                 cached = self._stream_cache.get(cache_key)
+                retry_after = self._stream_retry_after.get(cache_key, 0.0)
             if cached is not None and cached[0] > now:
                 return cached[1]
+            if cached is not None and retry_after > now:
+                return replace(cached[1], is_stale=True)
 
-        try:
-            page = self._load_stream(
-                scope_kind=scope_kind,
-                scope_value=scope_value,
-                continuation=continuation,
-                limit=limit,
-                include_read=include_read,
+        with self._stream_singleflight(refresh_key):
+            now = time.monotonic()
+            with self._lock:
+                self._prune_stream_retry_after_locked(now)
+                cache_generation = self._stream_cache_generation
+                cached = self._stream_cache.get(cache_key)
+                retry_after = self._stream_retry_after.get(cache_key, 0.0)
+            if cached is not None and cached[0] > now:
+                return cached[1]
+            if cached is not None and retry_after > now:
+                return replace(cached[1], is_stale=True)
+            try:
+                page = self._load_stream(
+                    scope_kind=scope_kind,
+                    scope_value=scope_value,
+                    continuation=continuation,
+                    limit=limit,
+                    include_read=include_read,
+                )
+            except (FreshRSSError, httpx.HTTPError, ValueError):
+                if cached is None:
+                    raise
+                logger.warning(
+                    "FreshRSS stream refresh failed; serving the expired cache",
+                    exc_info=True,
+                )
+                with self._lock:
+                    if cache_key in self._stream_cache:
+                        self._stream_retry_after[cache_key] = time.monotonic() + 5
+                return replace(cached[1], is_stale=True)
+            self._store_stream_cache(
+                cache_key,
+                page,
+                expected_generation=cache_generation,
             )
-        except (FreshRSSError, httpx.HTTPError, ValueError):
-            if cached is None:
-                raise
-            logger.warning(
-                "FreshRSS stream refresh failed; serving the expired cache",
-                exc_info=True,
-            )
-            return replace(cached[1], is_stale=True)
-        self._store_stream_cache(cache_key, page, expected_generation=cache_generation)
-        return page
+            return page
 
     def _load_stream(
         self,
@@ -261,15 +358,30 @@ class FreshRSSClient:
             return
         expires_at = time.monotonic() + self.settings.stream_cache_seconds
         with self._lock:
+            self._prune_stream_retry_after_locked(time.monotonic())
             if expected_generation != self._stream_cache_generation:
                 return
-            if len(self._stream_cache) >= 64 and cache_key not in self._stream_cache:
+            self._stream_retry_after.pop(cache_key, None)
+            if (
+                len(self._stream_cache) >= STREAM_PAGE_CACHE_LIMIT
+                and cache_key not in self._stream_cache
+            ):
                 oldest_key = min(
                     self._stream_cache,
                     key=lambda key: self._stream_cache[key][0],
                 )
                 self._stream_cache.pop(oldest_key, None)
+                self._stream_retry_after.pop(oldest_key, None)
             self._stream_cache[cache_key] = (expires_at, page)
+
+    def _prune_stream_retry_after_locked(self, now: float) -> None:
+        if not self._stream_retry_after:
+            return
+        self._stream_retry_after = {
+            key: retry_after
+            for key, retry_after in self._stream_retry_after.items()
+            if retry_after > now and key in self._stream_cache
+        }
 
     def get_entry(self, entry_id: str) -> FreshRSSEntry | None:
         cached = self._get_cached_entry(entry_id)
@@ -417,6 +529,20 @@ class FreshRSSClient:
                         expires_at,
                         replace(page, entries=entries),
                     )
+            for key, snapshot in self._stream_scan_cache.items():
+                keeps_read = key[1]
+                if is_read and not keeps_read:
+                    entries = [
+                        entry for entry in snapshot.entries if entry.id not in ids
+                    ]
+                else:
+                    entries = [
+                        replace(entry, is_read=is_read)
+                        if entry.id in ids
+                        else entry
+                        for entry in snapshot.entries
+                    ]
+                snapshot.entries = entries
 
     def _set_cached_stream_starred(
         self, entry_ids: Iterable[str], is_starred: bool
@@ -435,18 +561,38 @@ class FreshRSSClient:
                     expires_at,
                     replace(page, entries=entries),
                 )
+            for snapshot in self._stream_scan_cache.values():
+                snapshot.entries = [
+                    replace(entry, is_starred=is_starred)
+                    if entry.id in ids
+                    else entry
+                    for entry in snapshot.entries
+                ]
 
     def _clear_stream_cache(self, *, scope_kind: str | None = None) -> None:
         with self._lock:
             self._stream_cache_generation += 1
             if scope_kind is None:
                 self._stream_cache.clear()
+                self._stream_retry_after.clear()
+                self._stream_scan_cache.clear()
                 return
             self._stream_cache = {
                 key: value
                 for key, value in self._stream_cache.items()
                 if key[0] != scope_kind
             }
+            self._stream_retry_after = {
+                key: value
+                for key, value in self._stream_retry_after.items()
+                if key[0] != scope_kind
+            }
+            if scope_kind == "starred":
+                self._stream_scan_cache = {
+                    key: value
+                    for key, value in self._stream_scan_cache.items()
+                    if key[0] != STARRED_STATE
+                }
 
     def get_group(self, slug: str) -> FreshRSSGroup | None:
         navigation = self.list_navigation()
@@ -527,12 +673,11 @@ class FreshRSSClient:
             navigation=navigation,
             include_read=include_read,
         )
-        ordered_entries = sorted(entries, key=_entry_sort_key, reverse=True)
-        page_entries = ordered_entries[offset : offset + limit]
+        page_entries = entries[offset : offset + limit]
         next_offset = offset + limit
         next_continuation = (
             _encode_sorted_offset(next_offset)
-            if len(ordered_entries) > next_offset
+            if len(entries) > next_offset
             else None
         )
         return FreshRSSStreamPage(entries=page_entries, continuation=next_continuation)
@@ -554,8 +699,7 @@ class FreshRSSClient:
             navigation=navigation,
             include_read=include_read,
         )
-        ordered_entries = sorted(entries, key=_entry_sort_key, reverse=True)
-        return ordered_entries[:desired_count]
+        return entries[:desired_count]
 
     def _collect_entries_for_sorted_stream(
         self,
@@ -566,11 +710,50 @@ class FreshRSSClient:
         navigation: FreshRSSNavigation,
         include_read: bool,
     ) -> list[FreshRSSEntry]:
-        entries: list[FreshRSSEntry] = []
-        seen_ids: set[str] = set()
-        continuation: str | None = None
+        with self._stream_singleflight(("scan", stream_id, None, include_read)):
+            return self._collect_entries_for_sorted_stream_snapshot(
+                stream_id=stream_id,
+                scan_limit=scan_limit,
+                page_size=page_size,
+                navigation=navigation,
+                include_read=include_read,
+            )
 
-        while len(entries) < scan_limit:
+    def _collect_entries_for_sorted_stream_snapshot(
+        self,
+        *,
+        stream_id: str,
+        scan_limit: int,
+        page_size: int,
+        navigation: FreshRSSNavigation,
+        include_read: bool,
+    ) -> list[FreshRSSEntry]:
+        now = time.monotonic()
+        cache_key = (stream_id, include_read)
+        cache_generation = 0
+        expires_at = now + self.settings.stream_cache_seconds
+        entries: list[FreshRSSEntry] = []
+        continuation: str | None = None
+        complete = False
+
+        if self.settings.stream_cache_seconds > 0:
+            with self._lock:
+                cache_generation = self._stream_cache_generation
+                cached = self._stream_scan_cache.get(cache_key)
+                if cached is not None and cached.expires_at > now:
+                    entries = list(cached.entries)
+                    continuation = cached.continuation
+                    complete = cached.complete
+                    expires_at = cached.expires_at
+                elif cached is not None:
+                    self._stream_scan_cache.pop(cache_key, None)
+
+        seen_ids = {entry.id for entry in entries}
+        seen_continuations = {continuation} if continuation else set()
+        discovered_entries: list[FreshRSSEntry] = []
+        changed = False
+
+        while len(entries) + len(discovered_entries) < scan_limit and not complete:
             page = self._fetch_stream_page(
                 stream_id=stream_id,
                 navigation=navigation,
@@ -579,17 +762,67 @@ class FreshRSSClient:
                 exclude_read=not include_read,
             )
             if not page.entries:
+                complete = True
+                changed = True
                 break
             for entry in page.entries:
                 if entry.id in seen_ids:
                     continue
                 seen_ids.add(entry.id)
-                entries.append(entry)
-                if len(entries) >= scan_limit:
-                    break
-            if not page.continuation:
+                discovered_entries.append(entry)
+                changed = True
+            next_continuation = page.continuation
+            if (
+                not next_continuation
+                or next_continuation == continuation
+                or next_continuation in seen_continuations
+            ):
+                continuation = next_continuation
+                complete = True
+                changed = True
                 break
-            continuation = page.continuation
+            continuation = next_continuation
+            seen_continuations.add(continuation)
+            changed = True
+
+        if discovered_entries:
+            discovered_entries.sort(key=_entry_sort_key, reverse=True)
+            entries.extend(discovered_entries)
+
+        if self.settings.stream_cache_seconds > 0 and changed:
+            with self._lock:
+                now = time.monotonic()
+                self._stream_scan_cache = {
+                    key: value
+                    for key, value in self._stream_scan_cache.items()
+                    if value.expires_at > now
+                }
+                if cache_generation == self._stream_cache_generation:
+                    self._stream_scan_cache.pop(cache_key, None)
+                    if len(entries) <= STREAM_SCAN_CACHE_ENTRY_BUDGET:
+                        retained_entries = sum(
+                            len(snapshot.entries)
+                            for snapshot in self._stream_scan_cache.values()
+                        )
+                        while (
+                            self._stream_scan_cache
+                            and retained_entries + len(entries)
+                            > STREAM_SCAN_CACHE_ENTRY_BUDGET
+                        ):
+                            oldest_key = min(
+                                self._stream_scan_cache,
+                                key=lambda key: self._stream_scan_cache[
+                                    key
+                                ].expires_at,
+                            )
+                            evicted = self._stream_scan_cache.pop(oldest_key)
+                            retained_entries -= len(evicted.entries)
+                        self._stream_scan_cache[cache_key] = _StreamScanSnapshot(
+                            expires_at=expires_at,
+                            entries=entries,
+                            continuation=continuation,
+                            complete=complete,
+                        )
 
         return entries[:scan_limit]
 

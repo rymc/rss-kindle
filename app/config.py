@@ -34,6 +34,7 @@ class Settings:
     app_allowed_hosts: tuple[str, ...] = ()
     source_bridge_api_url: str | None = None
     source_bridge_access_token: str | None = None
+    source_bridge_timeout_seconds: float = 60
     source_bridge_config_path: Path | None = None
     source_bridge_refresh_seconds: int = 900
     source_bridge_prewarm_enabled: bool = True
@@ -106,6 +107,9 @@ def get_settings() -> Settings:
         app_allowed_hosts=_env_csv("APP_ALLOWED_HOSTS"),
         source_bridge_api_url=(os.getenv("SOURCE_BRIDGE_API_URL") or "").strip().rstrip("/") or None,
         source_bridge_access_token=(os.getenv("SOURCE_BRIDGE_ACCESS_TOKEN") or "").strip() or None,
+        source_bridge_timeout_seconds=max(
+            1, float(os.getenv("SOURCE_BRIDGE_TIMEOUT_SECONDS", "60"))
+        ),
         source_bridge_config_path=source_bridge_config_path,
         source_bridge_refresh_seconds=int(os.getenv("SOURCE_BRIDGE_REFRESH_SECONDS", "900")),
         source_bridge_prewarm_enabled=_env_flag("SOURCE_BRIDGE_PREWARM_ENABLED", True),

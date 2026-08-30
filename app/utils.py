@@ -132,7 +132,6 @@ def is_hacker_news_site(url: str | None) -> bool:
     )
 
 
-@lru_cache(maxsize=512)
 def extract_hacker_news_comments_url(
     *,
     summary_html: str | None,

@@ -55,6 +55,21 @@ def test_pairing_code_creates_a_long_lived_revocable_device(tmp_path: Path):
     assert service.authenticate(grant.token, now=now + timedelta(days=1)) is None
 
 
+def test_device_last_used_write_runs_only_after_the_daily_threshold(tmp_path: Path):
+    service, repository = build_service(tmp_path)
+    now = datetime(2026, 8, 29, 10, 0, tzinfo=UTC)
+    service.create_pairing_code(code="123456", now=now)
+    grant = service.redeem_pairing_code("123456", now=now)
+    assert grant is not None
+
+    assert service.authenticate(grant.token, now=now + timedelta(hours=12)) is not None
+    assert repository.list_reader_devices()[0].last_used_at == now.isoformat()
+
+    used_later = now + timedelta(hours=25)
+    assert service.authenticate(grant.token, now=used_later) is not None
+    assert repository.list_reader_devices()[0].last_used_at == used_later.isoformat()
+
+
 def test_pairing_code_expires_and_limits_guesses(tmp_path: Path):
     service, _ = build_service(tmp_path, attempts=2)
     now = datetime(2026, 8, 29, 10, 0, tzinfo=UTC)

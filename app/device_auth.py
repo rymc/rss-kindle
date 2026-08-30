@@ -100,11 +100,13 @@ class DeviceAuthService:
         )
         if device is None:
             return None
-        self.repository.touch_reader_device(
-            device.device_id,
-            used_at=used_at.isoformat(),
-            older_than=(used_at - timedelta(hours=24)).isoformat(),
-        )
+        older_than = (used_at - timedelta(hours=24)).isoformat()
+        if device.last_used_at < older_than:
+            self.repository.touch_reader_device(
+                device.device_id,
+                used_at=used_at.isoformat(),
+                older_than=older_than,
+            )
         csrf_token = hmac.new(
             self.secret.encode("utf-8"),
             f"device-csrf:{token}".encode(),

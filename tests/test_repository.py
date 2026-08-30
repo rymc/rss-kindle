@@ -38,3 +38,52 @@ def test_reading_context_has_a_short_stable_id_and_round_trips(tmp_path: Path):
     assert len(first_id) == 12
     assert repository.get_reading_context(first_id) == "encoded reading context"
     assert repository.get_reading_context("missing") is None
+
+    with sqlite3.connect(repository.database.path) as connection:
+        connection.execute(
+            "UPDATE reading_contexts SET saved_at = ? WHERE context_id = ?",
+            ("2020-01-01T00:00:00+00:00", first_id),
+        )
+        connection.commit()
+    repository.save_reading_context("encoded reading context")
+    with sqlite3.connect(repository.database.path) as connection:
+        refreshed_at = connection.execute(
+            "SELECT saved_at FROM reading_contexts WHERE context_id = ?",
+            (first_id,),
+        ).fetchone()[0]
+    assert refreshed_at > "2020-01-01T00:00:00+00:00"
+
+
+def test_initialize_adds_article_fingerprint_without_losing_cache(tmp_path: Path):
+    database_path = tmp_path / "rss.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE article_cache (
+                entry_id TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                extracted_html TEXT,
+                extracted_text TEXT,
+                extraction_status TEXT NOT NULL,
+                error_message TEXT,
+                extracted_at TEXT NOT NULL,
+                PRIMARY KEY (entry_id, source_url)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO article_cache VALUES (
+                'entry-1', 'https://example.com/1', '<p>Body</p>', 'Body',
+                'success', NULL, '2026-08-30T10:00:00+00:00'
+            )
+            """
+        )
+
+    repository = Repository(Database(database_path))
+    repository.initialize()
+
+    cached = repository.get_cached_article("entry-1", "https://example.com/1")
+    assert cached is not None
+    assert cached.extracted_html == "<p>Body</p>"
+    assert cached.source_fingerprint is None

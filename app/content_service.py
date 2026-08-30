@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
 from collections.abc import Callable
@@ -44,7 +45,7 @@ class ArticleExtractor:
         self.repository = repository
         self.client_factory = client_factory or self._default_client_factory
         self.bridge_client_factory = (
-            bridge_client_factory or self._default_client_factory
+            bridge_client_factory or self._default_bridge_client_factory
         )
         self._shared_client = (
             None if client_factory is not None else self._default_client_factory()
@@ -59,6 +60,17 @@ class ArticleExtractor:
         return httpx.Client(
             follow_redirects=True,
             timeout=self.settings.http_timeout_seconds,
+            headers={"User-Agent": self.settings.user_agent},
+        )
+
+    def _default_bridge_client_factory(self) -> httpx.Client:
+        timeout = httpx.Timeout(
+            self.settings.source_bridge_timeout_seconds,
+            connect=min(5, self.settings.http_timeout_seconds),
+        )
+        return httpx.Client(
+            follow_redirects=True,
+            timeout=timeout,
             headers={"User-Agent": self.settings.user_agent},
         )
 
@@ -95,21 +107,30 @@ class ArticleExtractor:
                 logger.warning("Article prewarm failed for %s", entry.id, exc_info=True)
 
     def ensure_extracted(self, entry: FreshRSSEntry) -> ExtractedArticle:
-        feed_content = self._extract_feed_content(entry)
         cached = self.repository.get_cached_article(entry.id, entry.url)
+        source_fingerprint = self._source_fingerprint(entry)
         if (
             cached
             and cached.extraction_status == "success"
-            and not self._cached_article_is_stale(entry, cached.extracted_html)
+            and cached.source_fingerprint == source_fingerprint
         ):
             return self._from_cache(cached)
+        feed_content = self._extract_feed_content(entry)
         if feed_content:
-            return self._save(entry, feed_content)
+            return self._save(entry, feed_content, source_fingerprint)
         if bridge_content := self._extract_via_source_bridge(entry):
-            return self._save(entry, bridge_content)
-        if cached and cached.extraction_status != "success":
+            return self._save(entry, bridge_content, source_fingerprint)
+        if (
+            cached
+            and cached.extraction_status != "success"
+            and cached.source_fingerprint == source_fingerprint
+        ):
             return self._from_cache(cached)
-        return self._save(entry, self._extract_from_source(entry))
+        return self._save(
+            entry,
+            self._extract_from_source(entry),
+            source_fingerprint,
+        )
 
     def _extract_from_source(self, entry: FreshRSSEntry) -> ExtractedArticle:
         if not entry.url:
@@ -123,15 +144,18 @@ class ArticleExtractor:
             return self._failure(entry, str(exc))
 
     def _save(
-        self, entry: FreshRSSEntry, article: ExtractedArticle
+        self,
+        entry: FreshRSSEntry,
+        article: ExtractedArticle,
+        source_fingerprint: str,
     ) -> ExtractedArticle:
         self.repository.save_cached_article(
             entry.id,
             source_url=entry.url,
             extracted_html=article.html,
-            extracted_text=article.text,
             extraction_status=article.extraction_status,
             error_message=article.error_message,
+            source_fingerprint=source_fingerprint,
         )
         return article
 
@@ -141,7 +165,7 @@ class ArticleExtractor:
         )
         return ExtractedArticle(
             html=cached.extracted_html or "",
-            text=cached.extracted_text or "",
+            text="",
             extraction_status=status,
             error_message=cached.error_message,
         )
@@ -225,14 +249,16 @@ class ArticleExtractor:
     def _extract_via_source_bridge(
         self, entry: FreshRSSEntry
     ) -> ExtractedArticle | None:
-        if not self.settings.source_bridge_api_url or not entry.url:
+        if (
+            not self.settings.source_bridge_api_url
+            or not self.settings.source_bridge_access_token
+            or not entry.url
+        ):
             return None
 
-        headers: dict[str, str] | None = None
-        if self.settings.source_bridge_access_token:
-            headers = {
-                "X-Source-Bridge-Token": self.settings.source_bridge_access_token
-            }
+        headers = {
+            "X-Source-Bridge-Token": self.settings.source_bridge_access_token
+        }
 
         try:
             with self._open_client(bridge=True) as client:
@@ -305,10 +331,19 @@ class ArticleExtractor:
             return True
         return total_block_text >= 90
 
-    def _cached_article_is_stale(
-        self, entry: FreshRSSEntry, cached_html: str | None
-    ) -> bool:
-        return not self._is_meaningful_extraction(entry, cached_html or "")
+    @staticmethod
+    def _source_fingerprint(entry: FreshRSSEntry) -> str:
+        digest = hashlib.sha256()
+        for value in (
+            entry.title,
+            entry.url,
+            entry.summary_html,
+            entry.content_html,
+        ):
+            encoded = (value or "").encode()
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+        return digest.hexdigest()
 
     def _looks_like_marketing_copy(self, text: str) -> bool:
         lowered = text.lower()

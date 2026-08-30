@@ -20,6 +20,7 @@ class BrowserSample:
     layout_shift: float
     long_task_ms: float
     horizontal_overflow: bool
+    page_turn_settle_ms: float | None
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -28,7 +29,7 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[index]
 
 
-def _read_sample(page) -> BrowserSample:
+def _read_sample(page, *, page_turn_settle_ms: float | None = None) -> BrowserSample:
     values = page.evaluate(
         """() => {
           const navigation = performance.getEntriesByType("navigation")[0];
@@ -64,7 +65,38 @@ def _read_sample(page) -> BrowserSample:
         layout_shift=float(values["layoutShift"]),
         long_task_ms=float(values["longTaskMs"]),
         horizontal_overflow=bool(values["horizontalOverflow"]),
+        page_turn_settle_ms=page_turn_settle_ms,
     )
+
+
+def _measure_page_turn_settle(page) -> float | None:
+    """Return a coarse two-frame settle time, not e-ink refresh latency."""
+    value = page.evaluate(
+        """async () => {
+          const button = document.querySelector('[data-page-turn="1"]');
+          if (!button || button.disabled) return null;
+          const controls = button.closest('[data-page-mode]');
+          if (!controls || controls.hidden) return null;
+          const isStream = controls?.getAttribute('data-page-mode') === 'stream';
+          if (isStream) {
+            const cards = document.querySelectorAll('[data-entry-card]');
+            const visibleCards = document.querySelectorAll('.is-stream-page-visible');
+            if (cards.length <= visibleCards.length) return null;
+          } else if (
+            document.documentElement.scrollHeight
+              <= document.documentElement.clientHeight + 24
+          ) {
+            return null;
+          }
+          const startedAt = performance.now();
+          button.click();
+          await new Promise((resolve) => requestAnimationFrame(
+            () => requestAnimationFrame(resolve)
+          ));
+          return performance.now() - startedAt;
+        }"""
+    )
+    return float(value) if value is not None else None
 
 
 def _summary(label: str, values: list[float], unit: str = "ms") -> str:
@@ -215,7 +247,10 @@ def _collect_samples(
                 cdp.send("Network.clearBrowserCache")
             page.goto(target_url, wait_until="load")
             page.wait_for_timeout(50)
-            samples.append(_read_sample(page))
+            page_turn_settle_ms = _measure_page_turn_settle(page)
+            samples.append(
+                _read_sample(page, page_turn_settle_ms=page_turn_settle_ms)
+            )
 
         context.close()
         browser.close()
@@ -255,6 +290,13 @@ def _print_report(
     )
     print(f"Layout shift: max {max(sample.layout_shift for sample in samples):.4f}")
     print(f"Long tasks: max {max(sample.long_task_ms for sample in samples):.1f} ms")
+    page_turns = [
+        sample.page_turn_settle_ms
+        for sample in samples
+        if sample.page_turn_settle_ms is not None
+    ]
+    if page_turns:
+        print(_summary("Two-frame page-turn settle (Chromium proxy)", page_turns))
     print(
         f"Horizontal overflow: {'yes' if any(sample.horizontal_overflow for sample in samples) else 'no'}"
     )

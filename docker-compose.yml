@@ -35,9 +35,9 @@ services:
       - ./data:/app/data
     environment:
       DATABASE_PATH: /app/data/rss_kindle.db
-      FRESHRSS_API_URL: ${FRESHRSS_API_URL:?set FRESHRSS_API_URL}
-      FRESHRSS_USERNAME: ${FRESHRSS_USERNAME:?set FRESHRSS_USERNAME}
-      FRESHRSS_API_PASSWORD: ${FRESHRSS_API_PASSWORD:?set FRESHRSS_API_PASSWORD}
+      FRESHRSS_API_URL: ${FRESHRSS_API_URL:-}
+      FRESHRSS_USERNAME: ${FRESHRSS_USERNAME:-}
+      FRESHRSS_API_PASSWORD: ${FRESHRSS_API_PASSWORD:-}
       APP_AUTH_USERNAME: ${APP_AUTH_USERNAME:-}
       APP_AUTH_PASSWORD: ${APP_AUTH_PASSWORD:-}
       APP_AUTH_SECRET: ${APP_AUTH_SECRET:-}
@@ -47,6 +47,7 @@ services:
       APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
       SOURCE_BRIDGE_API_URL: ${SOURCE_BRIDGE_API_URL:-http://source-bridge:8100}
       SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
+      SOURCE_BRIDGE_TIMEOUT_SECONDS: ${SOURCE_BRIDGE_TIMEOUT_SECONDS:-60}
       MAX_STREAM_ITEMS: ${MAX_STREAM_ITEMS:-15}
       METADATA_CACHE_SECONDS: ${METADATA_CACHE_SECONDS:-60}
       ENTRY_CACHE_SECONDS: ${ENTRY_CACHE_SECONDS:-300}
@@ -75,7 +76,8 @@ services:
       - -lc
       - >
         python -m app.cdp_proxy --listen-host 0.0.0.0 --listen-port 9223 --target-host 127.0.0.1 --target-port 9222 &
-        xvfb-run -a /ms-playwright/chromium-1208/chrome-linux64/chrome
+        browser_path="$$(python -c 'from playwright.sync_api import sync_playwright; playwright = sync_playwright().start(); print(playwright.chromium.executable_path); playwright.stop()')";
+        exec xvfb-run -a "$$browser_path"
         --no-first-run
         --no-default-browser-check
         --disable-dev-shm-usage
@@ -113,7 +115,7 @@ services:
     environment:
       DATABASE_PATH: /app/data/source_bridge.db
       SOURCE_BRIDGE_CONFIG_PATH: /app/source-bridge.toml
-      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:?set SOURCE_BRIDGE_ACCESS_TOKEN}
+      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
       APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
       SOURCE_BRIDGE_REFRESH_SECONDS: ${SOURCE_BRIDGE_REFRESH_SECONDS:-900}
       SOURCE_BRIDGE_PREWARM_ENABLED: ${SOURCE_BRIDGE_PREWARM_ENABLED:-true}

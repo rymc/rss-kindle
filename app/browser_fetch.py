@@ -64,53 +64,72 @@ class PersistentBrowserClient:
                 "Browser fetching requires the playwright package. Run `uv sync --extra dev`."
             ) from exc
 
-        self._playwright = sync_playwright().start()
-        if self.cdp_url:
-            self._browser = self._playwright.chromium.connect_over_cdp(
-                self.cdp_url,
-                timeout=int(self.timeout_seconds * 1000),
-            )
-            if not self._browser.contexts:
-                raise RuntimeError(
-                    "CDP browser has no default context. Launch Chromium with a persistent user-data-dir."
+        try:
+            self._playwright = sync_playwright().start()
+            if self.cdp_url:
+                self._browser = self._playwright.chromium.connect_over_cdp(
+                    self.cdp_url,
+                    timeout=int(self.timeout_seconds * 1000),
                 )
-            self._context = self._browser.contexts[0]
-            self._page = self._context.new_page()
-            self._close_page_on_exit = True
+                if not self._browser.contexts:
+                    raise RuntimeError(
+                        "CDP browser has no default context. Launch Chromium with a persistent user-data-dir."
+                    )
+                self._context = self._browser.contexts[0]
+                self._page = self._context.new_page()
+                self._close_page_on_exit = True
+                self._page.set_default_timeout(int(self.timeout_seconds * 1000))
+                return self
+
+            assert self.profile_path is not None
+            self.profile_path.mkdir(parents=True, exist_ok=True)
+
+            launch_kwargs: dict[str, object] = {
+                "headless": self.headless,
+                "user_agent": self.user_agent,
+                "args": list(self.launch_args),
+            }
+            if self.executable_path is not None:
+                launch_kwargs["executable_path"] = str(self.executable_path)
+            elif self.channel:
+                launch_kwargs["channel"] = self.channel
+
+            self._context = self._playwright.chromium.launch_persistent_context(
+                str(self.profile_path),
+                **launch_kwargs,
+            )
+            self._owns_context = True
+            self._page = (
+                self._context.pages[0]
+                if self._context.pages
+                else self._context.new_page()
+            )
             self._page.set_default_timeout(int(self.timeout_seconds * 1000))
             return self
-
-        assert self.profile_path is not None
-        self.profile_path.mkdir(parents=True, exist_ok=True)
-
-        launch_kwargs: dict[str, object] = {
-            "headless": self.headless,
-            "user_agent": self.user_agent,
-            "args": list(self.launch_args),
-        }
-        if self.executable_path is not None:
-            launch_kwargs["executable_path"] = str(self.executable_path)
-        elif self.channel:
-            launch_kwargs["channel"] = self.channel
-
-        self._context = self._playwright.chromium.launch_persistent_context(
-            str(self.profile_path),
-            **launch_kwargs,
-        )
-        self._owns_context = True
-        self._page = (
-            self._context.pages[0] if self._context.pages else self._context.new_page()
-        )
-        self._page.set_default_timeout(int(self.timeout_seconds * 1000))
-        return self
+        except Exception:
+            self._cleanup()
+            raise
 
     def __exit__(self, exc_type, exc, tb) -> bool:
+        self._cleanup()
+        return False
+
+    def _cleanup(self) -> None:
         if self._page is not None and self._close_page_on_exit:
-            self._page.close()
+            try:
+                self._page.close()
+            except Exception:  # noqa: BLE001, S110 - cleanup must continue
+                pass
         if self._context is not None and self._owns_context:
-            self._context.close()
+            try:
+                self._context.close()
+            except Exception:  # noqa: BLE001, S110 - cleanup must continue
+                pass
         if self._playwright is not None:
-            self._playwright.stop()
+            try:
+                self._playwright.stop()
+            except Exception:  # noqa: BLE001, S110 - cleanup must continue
+                pass
         self._page = None
         self._context = None
         self._playwright = None
@@ -118,7 +137,6 @@ class PersistentBrowserClient:
         self._seeded_cookie_headers = {}
         self._owns_context = False
         self._close_page_on_exit = False
-        return False
 
     def get(
         self,

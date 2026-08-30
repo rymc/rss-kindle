@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 from dataclasses import dataclass
+from datetime import timedelta
 
 from app.db import Database
-from app.utils import utc_now_iso
+from app.utils import utc_now, utc_now_iso
 
 
 @dataclass(frozen=True)
@@ -13,10 +14,10 @@ class CachedArticle:
     entry_id: str
     source_url: str
     extracted_html: str | None
-    extracted_text: str | None
     extraction_status: str
     error_message: str | None
     extracted_at: str
+    source_fingerprint: str | None
 
 
 @dataclass(frozen=True)
@@ -202,30 +203,44 @@ class Repository:
 
     def save_reading_context(self, payload: str) -> str:
         context_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
-        saved_at = utc_now_iso()
+        saved_at_datetime = utc_now()
+        saved_at = saved_at_datetime.isoformat()
+        touch_before = (saved_at_datetime - timedelta(hours=1)).isoformat()
         with self.database.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO reading_contexts (context_id, payload, saved_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(context_id) DO UPDATE SET
-                    payload = excluded.payload,
-                    saved_at = excluded.saved_at
-                """,
-                (context_id, payload, saved_at),
-            )
-            connection.execute(
-                """
-                DELETE FROM reading_contexts
-                WHERE context_id NOT IN (
-                    SELECT context_id
-                    FROM reading_contexts
-                    ORDER BY saved_at DESC
-                    LIMIT 256
+            existing = connection.execute(
+                "SELECT saved_at FROM reading_contexts WHERE context_id = ?",
+                (context_id,),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO reading_contexts (context_id, payload, saved_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (context_id, payload, saved_at),
                 )
-                """
-            )
-            connection.commit()
+                connection.execute(
+                    """
+                    DELETE FROM reading_contexts
+                    WHERE context_id NOT IN (
+                        SELECT context_id
+                        FROM reading_contexts
+                        ORDER BY saved_at DESC
+                        LIMIT 256
+                    )
+                    """
+                )
+                connection.commit()
+            elif str(existing["saved_at"]) < touch_before:
+                connection.execute(
+                    """
+                    UPDATE reading_contexts
+                    SET saved_at = ?
+                    WHERE context_id = ?
+                    """,
+                    (saved_at, context_id),
+                )
+                connection.commit()
         return context_id
 
     def get_reading_context(self, context_id: str) -> str | None:
@@ -263,10 +278,10 @@ class Repository:
                     entry_id,
                     source_url,
                     extracted_html,
-                    extracted_text,
                     extraction_status,
                     error_message,
-                    extracted_at
+                    extracted_at,
+                    source_fingerprint
                 FROM article_cache
                 WHERE entry_id = ? AND source_url = ?
                 """,
@@ -282,9 +297,9 @@ class Repository:
         *,
         source_url: str | None,
         extracted_html: str | None,
-        extracted_text: str | None,
         extraction_status: str,
         error_message: str | None = None,
+        source_fingerprint: str | None = None,
     ) -> None:
         normalized_url = (source_url or "").strip()
         with self.database.connect() as connection:
@@ -295,26 +310,28 @@ class Repository:
             connection.execute(
                 """
                 INSERT INTO article_cache (
-                    entry_id, source_url, extracted_html, extracted_text,
-                    extraction_status, error_message, extracted_at
+                    entry_id, source_url, extracted_html, extraction_status,
+                    error_message, extracted_at,
+                    source_fingerprint
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(entry_id, source_url) DO UPDATE SET
                     source_url = excluded.source_url,
                     extracted_html = excluded.extracted_html,
-                    extracted_text = excluded.extracted_text,
+                    extracted_text = NULL,
                     extraction_status = excluded.extraction_status,
                     error_message = excluded.error_message,
-                    extracted_at = excluded.extracted_at
+                    extracted_at = excluded.extracted_at,
+                    source_fingerprint = excluded.source_fingerprint
                 """,
                 (
                     entry_id,
                     normalized_url,
                     extracted_html,
-                    extracted_text,
                     extraction_status,
                     error_message,
                     utc_now_iso(),
+                    source_fingerprint,
                 ),
             )
             connection.commit()

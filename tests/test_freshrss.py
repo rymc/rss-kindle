@@ -1,3 +1,5 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -6,11 +8,14 @@ from app.freshrss import (
     READ_STATE,
     READING_LIST_STREAM,
     STARRED_STATE,
+    STREAM_PAGE_CACHE_LIMIT,
+    STREAM_SCAN_CACHE_ENTRY_BUDGET,
     FreshRSSClient,
     FreshRSSError,
     FreshRSSFeed,
     FreshRSSGroup,
     FreshRSSNavigation,
+    FreshRSSStreamPage,
     decode_feed_token,
     parse_navigation,
 )
@@ -371,6 +376,7 @@ def test_group_stream_merges_feeds_in_group_instead_of_label_stream():
         "Older item",
         "Oldest item",
     ]
+    assert client.calls == [("feed/1", None), ("feed/2", None)]
     assert all(stream_id != "user/-/label/Blogs" for stream_id, _ in client.calls)
 
 
@@ -421,12 +427,266 @@ def test_home_stream_overfetches_and_sorts_by_published_date():
     client = StubFreshRSSClient(settings, navigation, payloads)
 
     page = client.get_stream(scope_kind="home", limit=2)
+    next_page = client.get_stream(
+        scope_kind="home",
+        continuation=page.continuation,
+        limit=2,
+    )
 
     assert [entry.title for entry in page.entries] == [
         "Actually newest",
         "Second newest",
     ]
+    assert [entry.title for entry in next_page.entries] == [
+        "Old but recently inserted",
+        "Still old",
+    ]
     assert client.calls == [("reading-list", None), ("reading-list", "page-2")]
+
+
+def test_later_scan_response_does_not_reorder_articles_already_served():
+    settings = Settings(
+        app_name="RSS Kindle",
+        base_dir=TEST_BASE_DIR,
+        database_path=Path("/tmp/rss-kindle-test.db"),
+        http_timeout_seconds=5,
+        user_agent="test-agent",
+        max_stream_items=15,
+        metadata_cache_seconds=60,
+        stream_cache_seconds=60,
+        freshrss_api_url="https://rss.example.net/api/greader.php",
+        freshrss_username="alice",
+        freshrss_api_password="secret",
+    )
+    navigation = FreshRSSNavigation(groups=[], feeds=[])
+    first_batch = [
+        _item(
+            f"first-{index:02d}",
+            f"First batch {index:02d}",
+            2_000 - index,
+            "feed/1",
+            "Feed One",
+        )
+        for index in range(50)
+    ]
+    later_batch = [
+        _item(
+            "later-newest",
+            "Later response with a newer publication date",
+            3_000,
+            "feed/1",
+            "Feed One",
+        ),
+        *[
+            _item(
+                f"later-{index:02d}",
+                f"Later batch {index:02d}",
+                1_000 - index,
+                "feed/1",
+                "Feed One",
+            )
+            for index in range(49)
+        ],
+    ]
+    client = StubFreshRSSClient(
+        settings,
+        navigation,
+        {
+            (READING_LIST_STREAM, None): {
+                "items": first_batch,
+                "continuation": "page-2",
+            },
+            (READING_LIST_STREAM, "page-2"): {
+                "items": later_batch,
+                "continuation": None,
+            },
+        },
+    )
+
+    first_page = client.get_stream(scope_kind="home", limit=15)
+    second_page = client.get_stream(
+        scope_kind="home",
+        continuation=first_page.continuation,
+        limit=15,
+    )
+
+    assert [entry.id for entry in first_page.entries] == [
+        f"first-{index:02d}" for index in range(15)
+    ]
+    assert [entry.id for entry in second_page.entries] == [
+        f"first-{index:02d}" for index in range(15, 30)
+    ]
+    assert {entry.id for entry in first_page.entries}.isdisjoint(
+        entry.id for entry in second_page.entries
+    )
+    assert client.calls == [
+        (READING_LIST_STREAM, None),
+        (READING_LIST_STREAM, "page-2"),
+    ]
+
+
+def test_unrelated_stream_refreshes_can_run_concurrently(monkeypatch):
+    settings = Settings(
+        app_name="RSS Kindle",
+        base_dir=TEST_BASE_DIR,
+        database_path=Path("/tmp/rss-kindle-test.db"),
+        http_timeout_seconds=5,
+        user_agent="test-agent",
+        max_stream_items=15,
+        metadata_cache_seconds=60,
+        stream_cache_seconds=60,
+        freshrss_api_url="https://rss.example.net/api/greader.php",
+        freshrss_username="alice",
+        freshrss_api_password="secret",
+    )
+    client = FreshRSSClient(settings, client_factory=lambda: CapturingClient())
+    both_refreshes_started = threading.Barrier(2)
+
+    def load_stream(**kwargs):
+        both_refreshes_started.wait(timeout=1)
+        return FreshRSSStreamPage(entries=[], continuation=None)
+
+    monkeypatch.setattr(client, "_load_stream", load_stream)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        home = executor.submit(client.get_stream, scope_kind="home")
+        starred = executor.submit(client.get_stream, scope_kind="starred")
+        assert home.result(timeout=2).entries == []
+        assert starred.result(timeout=2).entries == []
+    assert client._stream_refresh_states == {}
+
+
+def test_same_stream_refreshes_share_one_in_flight_load(monkeypatch):
+    settings = Settings(
+        app_name="RSS Kindle",
+        base_dir=TEST_BASE_DIR,
+        database_path=Path("/tmp/rss-kindle-test.db"),
+        http_timeout_seconds=5,
+        user_agent="test-agent",
+        max_stream_items=15,
+        metadata_cache_seconds=60,
+        stream_cache_seconds=60,
+        freshrss_api_url="https://rss.example.net/api/greader.php",
+        freshrss_username="alice",
+        freshrss_api_password="secret",
+    )
+    client = FreshRSSClient(settings, client_factory=lambda: CapturingClient())
+    callers_ready = threading.Barrier(3)
+    first_load_started = threading.Event()
+    second_load_started = threading.Event()
+    release_load = threading.Event()
+    load_count = 0
+    load_count_lock = threading.Lock()
+
+    def load_stream(**kwargs):
+        nonlocal load_count
+        with load_count_lock:
+            load_count += 1
+            if load_count == 1:
+                first_load_started.set()
+            else:
+                second_load_started.set()
+        assert release_load.wait(timeout=2)
+        return FreshRSSStreamPage(entries=[], continuation=None)
+
+    def request_home():
+        callers_ready.wait(timeout=2)
+        return client.get_stream(scope_kind="home")
+
+    monkeypatch.setattr(client, "_load_stream", load_stream)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(request_home)
+        second = executor.submit(request_home)
+        callers_ready.wait(timeout=2)
+        assert first_load_started.wait(timeout=2)
+        assert not second_load_started.wait(timeout=0.1)
+        release_load.set()
+        assert first.result(timeout=2).entries == []
+        assert second.result(timeout=2).entries == []
+
+    assert load_count == 1
+    assert client._stream_refresh_states == {}
+
+
+def test_page_cache_eviction_removes_matching_retry_metadata(monkeypatch):
+    settings = Settings(
+        app_name="RSS Kindle",
+        base_dir=TEST_BASE_DIR,
+        database_path=Path("/tmp/rss-kindle-test.db"),
+        http_timeout_seconds=5,
+        user_agent="test-agent",
+        max_stream_items=1,
+        metadata_cache_seconds=60,
+        stream_cache_seconds=60,
+        freshrss_api_url="https://rss.example.net/api/greader.php",
+        freshrss_username="alice",
+        freshrss_api_password="secret",
+    )
+    client = FreshRSSClient(settings, client_factory=lambda: CapturingClient())
+    monkeypatch.setattr(
+        client,
+        "_load_stream",
+        lambda **kwargs: FreshRSSStreamPage(entries=[], continuation=None),
+    )
+
+    for index in range(STREAM_PAGE_CACHE_LIMIT):
+        client.get_stream(scope_kind="feed", scope_value=f"feed-{index}", limit=1)
+
+    oldest_key = ("feed", "feed-0", None, 1, False)
+    client._stream_retry_after[oldest_key] = float("inf")
+    client.get_stream(scope_kind="feed", scope_value="feed-overflow", limit=1)
+
+    assert oldest_key not in client._stream_cache
+    assert oldest_key not in client._stream_retry_after
+
+
+def test_scan_snapshots_stay_within_the_global_entry_budget():
+    settings = Settings(
+        app_name="RSS Kindle",
+        base_dir=TEST_BASE_DIR,
+        database_path=Path("/tmp/rss-kindle-test.db"),
+        http_timeout_seconds=5,
+        user_agent="test-agent",
+        max_stream_items=15,
+        metadata_cache_seconds=60,
+        stream_cache_seconds=60,
+        freshrss_api_url="https://rss.example.net/api/greader.php",
+        freshrss_username="alice",
+        freshrss_api_password="secret",
+    )
+    navigation = FreshRSSNavigation(groups=[], feeds=[])
+    payloads = {
+        (f"feed/{feed_index}", None): {
+            "items": [
+                _item(
+                    f"entry-{feed_index}-{entry_index}",
+                    f"Feed {feed_index} entry {entry_index}",
+                    2_000 - entry_index,
+                    f"feed/{feed_index}",
+                    f"Feed {feed_index}",
+                )
+                for entry_index in range(50)
+            ],
+            "continuation": None,
+        }
+        for feed_index in range(11)
+    }
+    client = StubFreshRSSClient(settings, navigation, payloads)
+
+    for feed_index in range(11):
+        client._collect_entries_for_sorted_stream(
+            stream_id=f"feed/{feed_index}",
+            scan_limit=50,
+            page_size=50,
+            navigation=navigation,
+            include_read=False,
+        )
+
+    retained_entries = sum(
+        len(snapshot.entries) for snapshot in client._stream_scan_cache.values()
+    )
+    assert retained_entries <= STREAM_SCAN_CACHE_ENTRY_BUDGET
 
 
 def test_stream_entries_are_reused_for_detail_requests():
@@ -571,3 +831,59 @@ def test_expired_stream_cache_refreshes_before_returning_and_falls_back_on_error
     assert refresh_attempts
     assert [entry.id for entry in stale.entries] == ["entry-2"]
     assert stale.is_stale is True
+
+    monotonic_time[0] = 223.0
+    backed_off = client.get_stream(scope_kind="home", limit=1)
+
+    assert backed_off.is_stale is True
+    assert len(refresh_attempts) == 1
+
+
+def test_expired_navigation_cache_is_reused_during_a_bounded_failure_backoff(
+    monkeypatch,
+):
+    monotonic_time = [100.0]
+    monkeypatch.setattr("app.freshrss.time.monotonic", lambda: monotonic_time[0])
+    settings = Settings(
+        app_name="RSS Kindle",
+        base_dir=TEST_BASE_DIR,
+        database_path=Path("/tmp/rss-kindle-test.db"),
+        http_timeout_seconds=5,
+        user_agent="test-agent",
+        max_stream_items=15,
+        metadata_cache_seconds=60,
+        freshrss_api_url="https://rss.example.net/api/greader.php",
+        freshrss_username="alice",
+        freshrss_api_password="secret",
+    )
+    client = FreshRSSClient(settings, client_factory=lambda: CapturingClient())
+    attempts = []
+
+    def navigation_request(*args, **kwargs):
+        attempts.append((args, kwargs))
+        if len(attempts) > 1:
+            raise FreshRSSError("FreshRSS is unavailable")
+        return {
+            "subscriptions": [
+                {
+                    "id": "feed/1",
+                    "title": "Feed One",
+                    "url": "https://example.com/feed.xml",
+                    "htmlUrl": "https://example.com",
+                    "categories": [],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "_request_json", navigation_request)
+
+    first = client.list_navigation()
+    monotonic_time[0] = 161.0
+    stale = client.list_navigation()
+    monotonic_time[0] = 162.0
+    backed_off = client.list_navigation()
+
+    assert first.feeds[0].title == "Feed One"
+    assert stale == first
+    assert backed_off == first
+    assert len(attempts) == 2

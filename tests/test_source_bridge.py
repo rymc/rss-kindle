@@ -1,5 +1,10 @@
+import threading
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+
+import pytest
 
 from app.config import Settings
 from app.db import Database
@@ -10,6 +15,7 @@ from app.source_bridge import (
     SourceCatalog,
     SourceDefinition,
 )
+from app.source_config import SourceBridgeError
 from app.utils import utc_now
 
 
@@ -57,6 +63,67 @@ class RecordingClient:
 
 class RecordingBrowserClient(RecordingClient):
     pass
+
+
+class ClientConcurrencyTracker:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.first_entered = threading.Event()
+        self.second_entered = threading.Event()
+        self.release_first = threading.Event()
+        self.entry_count = 0
+        self.active_count = 0
+        self.max_active_count = 0
+
+    def enter(self) -> None:
+        with self._lock:
+            self.entry_count += 1
+            entry_number = self.entry_count
+            self.active_count += 1
+            self.max_active_count = max(self.max_active_count, self.active_count)
+        if entry_number == 1:
+            self.first_entered.set()
+            if not self.release_first.wait(timeout=3):
+                self.exit()
+                raise TimeoutError("test did not release the first client")
+        else:
+            self.second_entered.set()
+
+    def exit(self) -> None:
+        with self._lock:
+            self.active_count -= 1
+
+
+class CoordinatedClient(RecordingClient):
+    def __init__(
+        self,
+        responses: dict[str, str | FakeResponse | Exception],
+        tracker: ClientConcurrencyTracker,
+    ):
+        super().__init__(responses)
+        self.tracker = tracker
+
+    def __enter__(self):
+        self.tracker.enter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.tracker.exit()
+        return False
+
+
+def run_thread_operation(
+    operation: Callable[[], object],
+    errors: list[Exception],
+    *,
+    started: threading.Event | None = None,
+) -> None:
+    if started is not None:
+        started.set()
+    try:
+        operation()
+    except Exception as exc:  # noqa: BLE001 - surface worker failures in the test thread
+        errors.append(exc)
 
 
 def build_settings(tmp_path: Path, *, refresh_seconds: int = 900) -> Settings:
@@ -283,6 +350,222 @@ def test_source_bridge_serves_cached_items_when_refresh_later_fails(tmp_path: Pa
     assert scheduled_refreshes == ["ft-home"]
 
 
+def test_background_and_synchronous_refreshes_do_not_overlap(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    tracker = ClientConcurrencyTracker()
+    responses = {
+        "https://www.ft.com/": (
+            '<html><body><a href="/content/story-1">Lead story</a></body></html>'
+        ),
+        "https://www.ft.com/content/story-1": """
+            <html><head><title>Lead story</title></head><body><article>
+              <p>This article has enough text for a coordinated source refresh.</p>
+            </article></body></html>
+        """,
+    }
+    service = SourceBridgeService(
+        settings,
+        repository,
+        catalog=build_catalog(),
+        client_factory=lambda: CoordinatedClient(responses, tracker),
+    )
+    errors: list[Exception] = []
+    sync_started = threading.Event()
+    sync_thread = threading.Thread(
+        target=run_thread_operation,
+        args=(lambda: service.refresh_source("ft-home"), errors),
+        kwargs={"started": sync_started},
+    )
+
+    assert service.schedule_refresh("ft-home") is True
+    first_entered = tracker.first_entered.wait(timeout=2)
+    duplicate_was_rejected = service.schedule_refresh("ft-home") is False
+    if first_entered:
+        sync_thread.start()
+        sync_started.wait(timeout=1)
+        second_entered_while_blocked = tracker.second_entered.wait(timeout=0.2)
+    else:
+        second_entered_while_blocked = False
+    tracker.release_first.set()
+    if sync_thread.ident is not None:
+        sync_thread.join(timeout=3)
+
+    assert first_entered
+    assert duplicate_was_rejected
+    assert sync_started.is_set()
+    assert not second_entered_while_blocked
+    assert not sync_thread.is_alive()
+    assert tracker.second_entered.wait(timeout=1)
+    assert errors == []
+    assert tracker.entry_count == 2
+    assert tracker.max_active_count == 1
+
+
+def test_source_bridge_reuses_unchanged_cached_articles(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    homepage_html = """
+        <html><body>
+          <a href="/content/story-1">Lead story</a>
+          <a href="/content/story-2">Second story</a>
+        </body></html>
+    """
+    first_client = RecordingClient(
+        {
+            "https://www.ft.com/": homepage_html,
+            "https://www.ft.com/content/story-1": """
+                <html><head><title>Lead story</title></head><body><article>
+                  <p>The first cached story contains enough useful text for the feed, including context, evidence, and a clear explanation for the reader.</p>
+                  <p>This second paragraph keeps the extracted article above the minimum content threshold.</p>
+                </article></body></html>
+            """,
+            "https://www.ft.com/content/story-2": """
+                <html><head><title>Second story</title></head><body><article>
+                  <p>The second cached story contains text that must survive a later refresh, with enough detail for full-content extraction.</p>
+                  <p>This second paragraph proves that the cached body remains useful when the source page has not changed.</p>
+                </article></body></html>
+            """,
+        }
+    )
+    service = SourceBridgeService(
+        settings,
+        repository,
+        catalog=build_catalog(),
+        client_factory=lambda: first_client,
+    )
+    service.refresh_source("ft-home")
+
+    refresh_client = RecordingClient(
+        {
+            "https://www.ft.com/": homepage_html,
+            "https://www.ft.com/content/story-1": """
+                <html><head><title>Lead story updated</title></head><body><article>
+                  <p>The most recent story is rechecked and can receive corrected text, new context, and updated facts from the publisher.</p>
+                  <p>This second paragraph keeps the refreshed article above the extraction threshold.</p>
+                </article></body></html>
+            """,
+        }
+    )
+    service.client_factory = lambda: refresh_client
+
+    items = service.refresh_source("ft-home")
+
+    assert [url for url, _, _ in refresh_client.calls] == [
+        "https://www.ft.com/",
+        "https://www.ft.com/content/story-1",
+    ]
+    assert items[0].title == "Lead story updated"
+    assert items[1].title == "Second story"
+    assert "must survive" in (items[1].content_html or "")
+
+
+def test_source_bridge_accepts_and_caches_an_empty_first_refresh(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    client = RecordingClient(
+        {"https://www.ft.com/": "<html><body>No matching articles</body></html>"}
+    )
+    service = SourceBridgeService(
+        settings,
+        repository,
+        catalog=build_catalog(),
+        client_factory=lambda: client,
+    )
+
+    first_xml = service.build_feed("ft-home")
+    second_xml = service.build_feed("ft-home")
+
+    state = repository.get_synthetic_source_state("ft-home")
+    assert first_xml == second_xml
+    assert "<item>" not in first_xml
+    assert client.calls == [("https://www.ft.com/", {"Cookie": "session=abc123"}, None)]
+    assert state is not None
+    assert state.last_successful_at is not None
+    assert state.last_error is None
+
+
+def test_source_bridge_keeps_snapshot_when_discovery_is_empty(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    healthy_client = RecordingClient(
+        {
+            "https://www.ft.com/": '<html><body><a href="/content/story-1">Lead story</a></body></html>',
+            "https://www.ft.com/content/story-1": """
+                <html><head><title>Lead story</title></head><body><article>
+                  <p>This cached story must remain available after an empty discovery response.</p>
+                </article></body></html>
+            """,
+        }
+    )
+    service = SourceBridgeService(
+        settings,
+        repository,
+        catalog=build_catalog(),
+        client_factory=lambda: healthy_client,
+    )
+    original_items = service.refresh_source("ft-home")
+    service.client_factory = lambda: RecordingClient(
+        {"https://www.ft.com/": "<html><body>Sign in to continue</body></html>"}
+    )
+
+    with pytest.raises(SourceBridgeError, match="keeping the cached feed"):
+        service.refresh_source("ft-home")
+
+    retained_items = repository.list_synthetic_feed_items("ft-home")
+    state = repository.get_synthetic_source_state("ft-home")
+    assert retained_items == original_items
+    assert state is not None
+    assert state.last_successful_at is not None
+    assert "keeping the cached feed" in (state.last_error or "")
+
+
+def test_source_bridge_keeps_cached_body_when_revalidation_returns_a_login_page(
+    tmp_path: Path,
+):
+    settings = build_settings(tmp_path)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    homepage_html = '<html><body><a href="/content/story-1">Lead story</a></body></html>'
+    healthy_client = RecordingClient(
+        {
+            "https://www.ft.com/": homepage_html,
+            "https://www.ft.com/content/story-1": """
+                <html><head><title>Lead story</title></head><body><article>
+                  <p>The complete cached story has enough detail to remain useful to the reader.</p>
+                  <p>This second paragraph keeps the full article above the extraction threshold.</p>
+                </article></body></html>
+            """,
+        }
+    )
+    service = SourceBridgeService(
+        settings,
+        repository,
+        catalog=build_catalog(),
+        client_factory=lambda: healthy_client,
+    )
+    original_item = service.refresh_source("ft-home")[0]
+    login_client = RecordingClient(
+        {
+            "https://www.ft.com/": homepage_html,
+            "https://www.ft.com/content/story-1": (
+                "<html><head><title>Sign in</title></head>"
+                "<body>Please sign in to continue.</body></html>"
+            ),
+        }
+    )
+    service.client_factory = lambda: login_client
+
+    retained_item = service.refresh_source("ft-home")[0]
+
+    assert retained_item.title == original_item.title
+    assert retained_item.content_html == original_item.content_html
+
+
 def test_schedule_stale_refreshes_uses_lookahead_window(tmp_path: Path):
     settings = build_settings(tmp_path, refresh_seconds=900)
     repository = Repository(Database(settings.database_path))
@@ -502,6 +785,166 @@ def test_source_bridge_uses_browser_backend_without_cookie_headers(tmp_path: Pat
         ("https://www.ft.com/", {}, "session=abc123"),
         ("https://www.ft.com/content/story-1", {}, "session=abc123"),
     ]
+
+
+def test_browser_profile_serializes_refresh_and_article_extraction(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    base_catalog = build_catalog()
+    browser_catalog = SourceCatalog(
+        auth_profiles=base_catalog.auth_profiles,
+        sources={
+            "ft-home": replace(
+                base_catalog.sources["ft-home"],
+                fetch_backend="browser",
+                max_items=1,
+            )
+        },
+    )
+    tracker = ClientConcurrencyTracker()
+    responses = {
+        "https://www.ft.com/": (
+            '<html><body><a href="/content/story-1">Lead story</a></body></html>'
+        ),
+        "https://www.ft.com/content/story-1": """
+            <html><head><title>Lead story</title></head><body><article>
+              <p>This is a complete article used to verify that a refresh and an article extraction cannot use the same browser profile at the same time.</p>
+              <p>The second paragraph keeps the extracted content above the required length.</p>
+            </article></body></html>
+        """,
+    }
+    service = SourceBridgeService(
+        settings,
+        repository,
+        catalog=browser_catalog,
+        browser_client_factory=lambda source, profile: CoordinatedClient(
+            responses, tracker
+        ),
+        browser_concurrency=2,
+    )
+    errors: list[Exception] = []
+    extracted_titles: list[str] = []
+    extraction_started = threading.Event()
+    refresh_thread = threading.Thread(
+        target=run_thread_operation,
+        args=(lambda: service.refresh_source("ft-home"), errors),
+    )
+    extraction_thread = threading.Thread(
+        target=run_thread_operation,
+        args=(
+            lambda: extracted_titles.append(
+                service.extract_article(
+                    "https://www.ft.com/content/story-1"
+                ).title
+            ),
+            errors,
+        ),
+        kwargs={"started": extraction_started},
+    )
+
+    refresh_thread.start()
+    first_entered = tracker.first_entered.wait(timeout=2)
+    if first_entered:
+        extraction_thread.start()
+        extraction_started.wait(timeout=1)
+        second_entered_while_blocked = tracker.second_entered.wait(timeout=0.2)
+    else:
+        second_entered_while_blocked = False
+    tracker.release_first.set()
+    refresh_thread.join(timeout=3)
+    if extraction_thread.ident is not None:
+        extraction_thread.join(timeout=3)
+
+    assert first_entered
+    assert extraction_started.is_set()
+    assert not second_entered_while_blocked
+    assert not refresh_thread.is_alive()
+    assert not extraction_thread.is_alive()
+    assert errors == []
+    assert extracted_titles == ["Lead story"]
+    assert tracker.entry_count == 2
+    assert tracker.max_active_count == 1
+
+
+def test_browser_clients_respect_the_global_concurrency_limit(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    base_catalog = build_catalog()
+    browser_catalog = SourceCatalog(
+        auth_profiles={
+            "ft": base_catalog.auth_profiles["ft"],
+            "news": AuthProfile(
+                name="news",
+                domains=("news.example.com",),
+                browser_profile_path=tmp_path / "profiles" / "news",
+            ),
+        },
+        sources={
+            "ft-home": replace(
+                base_catalog.sources["ft-home"],
+                fetch_backend="browser",
+                max_items=1,
+            ),
+            "news-home": SourceDefinition(
+                source_id="news-home",
+                title="News Home",
+                start_urls=("https://news.example.com/",),
+                auth_profile="news",
+                fetch_backend="browser",
+                max_items=1,
+            ),
+        },
+    )
+    tracker = ClientConcurrencyTracker()
+
+    def browser_client_factory(source, profile):
+        return CoordinatedClient(
+            {source.start_urls[0]: "<html><body>No links</body></html>"},
+            tracker,
+        )
+
+    service = SourceBridgeService(
+        settings,
+        repository,
+        catalog=browser_catalog,
+        browser_client_factory=browser_client_factory,
+        browser_concurrency=1,
+    )
+    errors: list[Exception] = []
+    second_started = threading.Event()
+    first_thread = threading.Thread(
+        target=run_thread_operation,
+        args=(lambda: service.discover_links("ft-home"), errors),
+    )
+    second_thread = threading.Thread(
+        target=run_thread_operation,
+        args=(lambda: service.discover_links("news-home"), errors),
+        kwargs={"started": second_started},
+    )
+
+    first_thread.start()
+    first_entered = tracker.first_entered.wait(timeout=2)
+    if first_entered:
+        second_thread.start()
+        second_started.wait(timeout=1)
+        second_entered_while_blocked = tracker.second_entered.wait(timeout=0.2)
+    else:
+        second_entered_while_blocked = False
+    tracker.release_first.set()
+    first_thread.join(timeout=3)
+    if second_thread.ident is not None:
+        second_thread.join(timeout=3)
+
+    assert first_entered
+    assert second_started.is_set()
+    assert not second_entered_while_blocked
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert errors == []
+    assert tracker.entry_count == 2
+    assert tracker.max_active_count == 1
 
 
 def test_discover_links_uses_browser_backend_client(tmp_path: Path):
