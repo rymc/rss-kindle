@@ -22,6 +22,7 @@ from app.reader_navigation import (
     ReadingContext,
     StreamRequest,
     StreamScope,
+    article_key,
     entry_id_from_article_key,
     item_detail_url,
 )
@@ -44,6 +45,7 @@ from app.web_runtime import (
 @dataclass(frozen=True)
 class StreamItemView:
     id: str
+    list_anchor: str
     title: str
     published_at: str | None
     summary_excerpt: str
@@ -440,6 +442,11 @@ class ReaderController:
             entry_id,
             context_id,
         )
+        back_url = (
+            reading_context.back_url
+            if reading_context
+            else str(self.app.url_path_for("home"))
+        )
         context = build_template_context(
             self.services,
             request,
@@ -454,9 +461,8 @@ class ReaderController:
                 "source_label": source_label,
                 "fallback_used": article.extraction_status == "failed",
                 "error_message": article.error_message,
-                "back_url": reading_context.back_url
-                if reading_context
-                else str(self.app.url_path_for("home")),
+                "back_url": back_url,
+                "return_url": f"{back_url}#entry-{article_key(entry.id)}",
                 "previous_url": navigation.previous_url,
                 "next_url": navigation.next_url,
                 "next_title": navigation.next_title,
@@ -561,6 +567,7 @@ class ReaderController:
         )
         return StreamItemView(
             id=entry.id,
+            list_anchor=f"entry-{article_key(entry.id)}",
             title=entry.title,
             published_at=entry.published_at,
             summary_excerpt=truncate_text(entry.summary_text, 160),

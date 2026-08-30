@@ -420,7 +420,7 @@ button,
   color: #444;
 }
 
-.article-home-fixed {
+.article-close-fixed {
   position: fixed;
   z-index: 5;
   top: 0;
@@ -429,12 +429,14 @@ button,
   width: 2.25rem;
   height: 2.25rem;
   padding: 0;
-  border: 0;
+  border: 1px solid #315f70;
+  border-radius: 50%;
   outline: 0;
   background: #fff;
   box-shadow: none;
   color: #315f70;
-  font-size: 1.15rem;
+  font-size: 1.55rem;
+  font-weight: 600;
   line-height: 1;
   align-items: center;
   justify-content: center;
@@ -442,8 +444,8 @@ button,
   -webkit-tap-highlight-color: transparent;
 }
 
-.article-home-fixed:focus,
-.article-home-fixed:active {
+.article-close-fixed:focus,
+.article-close-fixed:active {
   outline: 0;
   background: #fff;
   box-shadow: none;
@@ -664,7 +666,7 @@ button:disabled {
     font-size: 1.55rem;
   }
 
-  .article-home-fixed {
+  .article-close-fixed {
     width: 2rem;
   }
 

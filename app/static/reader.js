@@ -113,6 +113,19 @@
       : Math.min(streamPageIndex, Math.max(0, streamPages.length - 1));
   }
 
+  function restoreStreamPageFromAnchor() {
+    if (!streamList || window.location.hash.indexOf("#entry-") !== 0) return;
+    var target = doc.getElementById(window.location.hash.slice(1));
+    var pageIndex;
+    if (!target) return;
+    for (pageIndex = 0; pageIndex < streamPages.length; pageIndex += 1) {
+      if (streamPages[pageIndex].indexOf(target) !== -1) {
+        streamPageIndex = pageIndex;
+        return;
+      }
+    }
+  }
+
   function showStreamPage() {
     var index;
     var firstArticleIndex = 0;
@@ -277,6 +290,7 @@
 
   if (streamControls) {
     buildStreamPages(window.location.hash === "#end");
+    restoreStreamPageFromAnchor();
     showStreamPage();
   }
   updatePageControls();
@@ -305,8 +319,8 @@
   }, false);
 
   doc.addEventListener("click", function (event) {
-    var homeLink = findWithAttribute(event.target, "data-home-link");
-    if (homeLink && homeLink.blur) homeLink.blur();
+    var closeLink = findWithAttribute(event.target, "data-close-article");
+    if (closeLink && closeLink.blur) closeLink.blur();
 
     var turnButton = findWithAttribute(event.target, "data-page-turn");
     if (turnButton) {
