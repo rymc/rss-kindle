@@ -183,58 +183,46 @@ Prepare the bridge config:
 ```bash
 cp source-bridge.example.toml source-bridge.toml
 export RSS_KINDLE_SOURCE_BRIDGE_CONFIG="$(pwd)/source-bridge.toml"
+export SOURCE_BRIDGE_ACCESS_TOKEN="$(openssl rand -hex 32)"
 ```
 
-Start FreshRSS first:
+For a new FreshRSS instance, complete Path B first. Both examples use the same FreshRSS data paths by default. Stop the Path B stack before you start this one.
 
-```bash
-docker compose -f examples/full-stack/docker-compose.yml up -d freshrss
-```
-
-Verify FreshRSS:
-
-- FreshRSS setup or login UI: [http://127.0.0.1:8081/](http://127.0.0.1:8081/)
-
-Then:
-
-1. Complete the normal FreshRSS setup flow.
-2. Create the FreshRSS account that `rss-kindle` should use.
-3. Enable API access and set an API password for that account.
+Update the example hostnames in `examples/full-stack/Caddyfile`. Make sure those names resolve to the Docker host.
 
 FreshRSS itself will continue to use FreshRSS's own login page. That is separate from the optional built-in `rss-kindle` login described later in this README.
 
-Start the rest of the stack:
+Start the stack:
 
 ```bash
 FRESHRSS_API_URL=http://freshrss/api/greader.php \
 FRESHRSS_USERNAME=your-freshrss-username \
 FRESHRSS_API_PASSWORD=replace-me \
-docker compose -f examples/full-stack/docker-compose.yml up -d rss-kindle source-bridge caddy
+docker compose -f examples/full-stack/docker-compose.yml up -d
 ```
 
-Optional but recommended in this path:
+Recommended in this path:
 
 - `APP_AUTH_USERNAME`
 - `APP_AUTH_PASSWORD`
 - `APP_AUTH_SECRET`
 - `APP_ALLOWED_HOSTS`
-- `SOURCE_BRIDGE_ACCESS_TOKEN`
 - `APP_SECURE_COOKIES=false` only if you are testing over plain HTTP instead of HTTPS
 
-Those variables can be exported in the shell before the `docker compose` command or placed in a Compose `.env` file.
+`SOURCE_BRIDGE_ACCESS_TOKEN` is required. The other variables in this list are optional. Export them before the `docker compose` command or put them in a Compose `.env` file. Restrict access to that file.
 
 Verify:
 
-- FreshRSS UI: [http://127.0.0.1:8081/](http://127.0.0.1:8081/)
-- Kindle UI through Caddy: [http://127.0.0.1/](http://127.0.0.1/)
+- FreshRSS UI: the FreshRSS hostname configured in `examples/full-stack/Caddyfile`
+- Kindle UI: the reader hostname configured in `examples/full-stack/Caddyfile`
 
-By default, `source-bridge` stays internal to the Docker network in this example. FreshRSS should subscribe to it using:
+FreshRSS and `source-bridge` stay internal to the Docker network. FreshRSS should subscribe to the bridge with:
 
 ```text
 http://source-bridge:8100/synthetic/{source_id}.xml
 ```
 
-If you want a host-visible bridge endpoint on port `8100`, use the root [`docker-compose.yml`](docker-compose.yml) instead of the full stack example.
+Set the feed HTTP username to `source-bridge`. Set its HTTP password to the value of `SOURCE_BRIDGE_ACCESS_TOKEN`. Do not put the token in the feed URL.
 
 ## How It Fits Together
 
@@ -290,20 +278,17 @@ To start it:
 
 ```bash
 cp source-bridge.example.toml source-bridge.toml
+export SOURCE_BRIDGE_ACCESS_TOKEN="$(openssl rand -hex 32)"
 docker compose up --build -d rss-kindle source-bridge
 ```
 
-FreshRSS can then subscribe to synthetic feeds at:
+Connect FreshRSS to the same Docker network. It can then subscribe to synthetic feeds at:
 
 ```text
-http://<host>:8100/synthetic/{source_id}.xml
+http://source-bridge:8100/synthetic/{source_id}.xml
 ```
 
-For the included FT example:
-
-```text
-http://<host>:8100/synthetic/ft-home.xml
-```
+Set the feed HTTP username to `source-bridge`. Set its HTTP password to the value of `SOURCE_BRIDGE_ACCESS_TOKEN`.
 
 All detailed bridge documentation is in [docs/source-bridge.md](docs/source-bridge.md).
 
@@ -361,7 +346,7 @@ Use the smaller one unless you already know you need bridged sites.
 | `BACKUP_DIRECTORY` | no | directory for application backup archives | `data/backups` |
 | `BACKUP_RETENTION_COUNT` | no | number of application archives to retain | `7` |
 | `SOURCE_BRIDGE_API_URL` | no | optional base URL of a running `source-bridge` service | unset in the app; bridge Compose stacks use `http://source-bridge:8100` |
-| `SOURCE_BRIDGE_ACCESS_TOKEN` | no | shared token used when `rss-kindle` talks to a protected `source-bridge` | unset |
+| `SOURCE_BRIDGE_ACCESS_TOKEN` | when the bridge runs | shared token used by `rss-kindle`, FreshRSS, and `source-bridge` | none; bridge access is denied when unset |
 
 See [.env.example](.env.example) for the template.
 
@@ -506,7 +491,7 @@ Quick checklist:
 - enable API access for that FreshRSS user and set its API password
 - set `FRESHRSS_USERNAME` and `FRESHRSS_API_PASSWORD` for `rss-kindle`
 - optionally set `APP_AUTH_*` if you want a login page in front of `rss-kindle`
-- optionally set `SOURCE_BRIDGE_ACCESS_TOKEN` if you expose `source-bridge`
+- set `SOURCE_BRIDGE_ACCESS_TOKEN` whenever you run `source-bridge`
 
 ## Authentication Surfaces
 
@@ -514,7 +499,7 @@ There are three distinct authentication layers in a typical deployment:
 
 - FreshRSS auth: protects the FreshRSS web UI and account management. For personal deployments, start with FreshRSS form authentication.
 - `rss-kindle` auth: optional single-user login controlled by `APP_AUTH_*`.
-- `source-bridge` auth: optional shared-token protection controlled by `SOURCE_BRIDGE_ACCESS_TOKEN`.
+- `source-bridge` auth: required shared-token protection controlled by `SOURCE_BRIDGE_ACCESS_TOKEN`.
 
 These layers are independent:
 
@@ -531,11 +516,12 @@ Use this as the baseline checklist for a non-trivial deployment:
 - set `APP_ALLOWED_HOSTS` to your real domain names when you know them
 - keep FreshRSS on FreshRSS's own form login or a stronger SSO/reverse-proxy setup; do not disable FreshRSS auth on an exposed host
 - keep `.env`, cookies, browser profiles, and `source-bridge.toml` out of git
-- keep `source-bridge` internal when you can; if you expose it, protect it with `SOURCE_BRIDGE_ACCESS_TOKEN` or your own reverse proxy auth
+- keep `source-bridge` internal and set `SOURCE_BRIDGE_ACCESS_TOKEN`; the bridge denies protected requests when the token is absent
 - the app containers run without root, with all Linux capabilities removed and a read-only root filesystem in the shipped Compose files
 - set `RSS_KINDLE_UID` and `RSS_KINDLE_GID` to the numeric owner of the host data directory; both default to `1000`
-- remember that the root [`docker-compose.yml`](docker-compose.yml) and [`examples/reader-with-freshrss/docker-compose.yml`](examples/reader-with-freshrss/docker-compose.yml) publish app ports directly on the host
-- remember that [`examples/full-stack/docker-compose.yml`](examples/full-stack/docker-compose.yml) still publishes FreshRSS on `:8081` for setup and administration; remove that mapping if you do not need direct host access after setup
+- the root [`docker-compose.yml`](docker-compose.yml) publishes only the reader on port `8000`; it keeps the bridge internal
+- [`examples/reader-with-freshrss/docker-compose.yml`](examples/reader-with-freshrss/docker-compose.yml) binds FreshRSS to host loopback on port `8081`
+- [`examples/full-stack/docker-compose.yml`](examples/full-stack/docker-compose.yml) publishes only Caddy; it keeps FreshRSS and the bridge internal
 
 ## Local Development
 
@@ -556,7 +542,8 @@ Run the bridge separately only if you are working on bridge functionality:
 
 ```bash
 cp source-bridge.example.toml source-bridge.toml
-uv run uvicorn app.source_main:create_app --factory --reload --port 8100
+SOURCE_BRIDGE_ACCESS_TOKEN=dev-only-token \
+  uv run uvicorn app.source_main:create_app --factory --reload --port 8100
 ```
 
 If your environment has trouble creating an in-project virtualenv on a mounted or networked filesystem, set:

@@ -59,7 +59,11 @@ def _start_prewarm(
     source_bridge: SourceBridgeService,
     stop_event: threading.Event,
 ) -> threading.Thread | None:
-    if not settings.source_bridge_prewarm_enabled or not source_bridge.list_sources():
+    if (
+        not settings.source_bridge_access_token
+        or not settings.source_bridge_prewarm_enabled
+        or not source_bridge.list_sources()
+    ):
         return None
     interval_seconds = max(1, settings.source_bridge_prewarm_interval_seconds)
     try:

@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -72,10 +73,16 @@ def build_settings(tmp_path: Path) -> Settings:
 
 
 def test_source_main_serves_synthetic_feed(tmp_path: Path):
-    app = create_app(build_settings(tmp_path), source_bridge=FakeSourceBridge())
+    settings = Settings(
+        **{**build_settings(tmp_path).__dict__, "source_bridge_access_token": "bridge-token"}
+    )
+    app = create_app(settings, source_bridge=FakeSourceBridge())
     client = TestClient(app)
 
-    response = client.get("/synthetic/ft-home.xml")
+    response = client.get(
+        "/synthetic/ft-home.xml",
+        headers={"X-Source-Bridge-Token": "bridge-token"},
+    )
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/rss+xml")
@@ -91,6 +98,7 @@ def test_source_main_requires_token_when_configured(tmp_path: Path):
 
     health = client.get("/health")
     assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
 
     blocked_status = client.get("/status")
     assert blocked_status.status_code == 401
@@ -115,6 +123,58 @@ def test_source_main_requires_token_when_configured(tmp_path: Path):
         params={"url": "https://www.ft.com/content/story-1", "access_token": "bridge-token"},
     )
     assert allowed_extract.status_code == 200
+
+
+def test_source_main_accepts_freshrss_http_basic_credentials(tmp_path: Path):
+    settings = Settings(
+        **{**build_settings(tmp_path).__dict__, "source_bridge_access_token": "bridge-token"}
+    )
+    app = create_app(settings, source_bridge=FakeSourceBridge())
+    client = TestClient(app)
+    credentials = base64.b64encode(b"source-bridge:bridge-token").decode("ascii")
+
+    allowed_feed = client.get(
+        "/synthetic/ft-home.xml",
+        headers={"Authorization": f"Basic {credentials}"},
+    )
+    wrong_user = base64.b64encode(b"other:bridge-token").decode("ascii")
+    blocked_feed = client.get(
+        "/synthetic/ft-home.xml",
+        headers={"Authorization": f"Basic {wrong_user}"},
+    )
+    malformed_feed = client.get(
+        "/synthetic/ft-home.xml",
+        headers={"Authorization": "Basic not-base64"},
+    )
+
+    assert allowed_feed.status_code == 200
+    assert blocked_feed.status_code == 401
+    assert malformed_feed.status_code == 401
+
+
+def test_source_main_fails_closed_when_token_is_not_configured(tmp_path: Path):
+    source_bridge = FakeSourceBridge()
+    app = create_app(build_settings(tmp_path), source_bridge=source_bridge)
+    client = TestClient(app)
+
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
+
+    blocked_requests = [
+        client.get("/sources"),
+        client.get("/status"),
+        client.post("/sources/ft-home/refresh"),
+        client.get("/synthetic/ft-home.xml"),
+        client.get(
+            "/extract",
+            params={"url": "https://www.ft.com/content/story-1"},
+            headers={"X-Source-Bridge-Token": "unconfigured-token"},
+        ),
+    ]
+
+    assert {response.status_code for response in blocked_requests} == {401}
+    assert source_bridge.refresh_calls == []
 
 
 def test_source_main_allows_configured_internal_bridge_host(tmp_path: Path):
@@ -149,12 +209,16 @@ def test_source_main_allows_configured_internal_bridge_host(tmp_path: Path):
 
 
 def test_source_main_serves_extracted_article_json(tmp_path: Path):
-    app = create_app(build_settings(tmp_path), source_bridge=FakeSourceBridge())
+    settings = Settings(
+        **{**build_settings(tmp_path).__dict__, "source_bridge_access_token": "bridge-token"}
+    )
+    app = create_app(settings, source_bridge=FakeSourceBridge())
     client = TestClient(app)
 
     response = client.get(
         "/extract",
         params={"url": "https://www.ft.com/content/story-1", "title": "Lead story"},
+        headers={"X-Source-Bridge-Token": "bridge-token"},
     )
 
     assert response.status_code == 200
@@ -166,11 +230,15 @@ def test_source_main_serves_extracted_article_json(tmp_path: Path):
 
 def test_source_main_reports_status_and_schedules_manual_refresh(tmp_path: Path):
     source_bridge = FakeSourceBridge()
-    app = create_app(build_settings(tmp_path), source_bridge=source_bridge)
+    settings = Settings(
+        **{**build_settings(tmp_path).__dict__, "source_bridge_access_token": "bridge-token"}
+    )
+    app = create_app(settings, source_bridge=source_bridge)
     client = TestClient(app)
 
-    status = client.get("/status")
-    refresh = client.post("/sources/ft-home/refresh")
+    headers = {"X-Source-Bridge-Token": "bridge-token"}
+    status = client.get("/status", headers=headers)
+    refresh = client.post("/sources/ft-home/refresh", headers=headers)
 
     assert status.status_code == 200
     assert status.json()[0]["item_count"] == 12
@@ -183,6 +251,7 @@ def test_source_main_starts_prewarm_on_startup(tmp_path: Path):
     settings = Settings(
         **{
             **build_settings(tmp_path).__dict__,
+            "source_bridge_access_token": "bridge-token",
             "source_bridge_prewarm_enabled": True,
             "source_bridge_prewarm_interval_seconds": 7,
         }
@@ -194,3 +263,12 @@ def test_source_main_starts_prewarm_on_startup(tmp_path: Path):
 
     assert source_bridge.schedule_calls
     assert source_bridge.schedule_calls[0] == 7
+
+
+def test_source_main_does_not_prewarm_without_access_token(tmp_path: Path):
+    source_bridge = FakeSourceBridge()
+
+    with TestClient(create_app(build_settings(tmp_path), source_bridge=source_bridge)):
+        pass
+
+    assert source_bridge.schedule_calls == []
