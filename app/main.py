@@ -70,7 +70,7 @@ def create_app(
         close_services(services)
 
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
-    app.add_middleware(GZipMiddleware, minimum_size=500)
+    app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
     if settings.app_allowed_hosts:
         app.add_middleware(
             TrustedHostMiddleware,

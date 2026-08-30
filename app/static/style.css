@@ -18,7 +18,7 @@ body {
   margin: 0;
   max-width: 100%;
   overflow-x: hidden;
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: Bookerly, Georgia, "Times New Roman", serif;
   line-height: 1.6;
   background: #fff;
   color: #111;
@@ -36,7 +36,18 @@ button {
 button,
 select,
 input {
-  font: inherit;
+  font-family: "Amazon Ember", Arial, Helvetica, sans-serif;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.site-header,
+.item-meta,
+.stream-context,
+.empty-state,
+.notice,
+.action-row-bottom {
+  font-family: "Amazon Ember", Arial, Helvetica, sans-serif;
 }
 
 button,
@@ -212,7 +223,7 @@ button,
   min-width: 0;
   margin: 0 0.5rem;
   color: #405057;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: "Amazon Ember", Arial, Helvetica, sans-serif;
   font-size: 0.72rem;
   line-height: 1.2;
   overflow: hidden;
@@ -574,7 +585,7 @@ button,
   border-top: 1px solid #65777e;
   background: #fff;
   color: #35484f;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: "Amazon Ember", Arial, Helvetica, sans-serif;
   font-size: 0.72rem;
   line-height: 1.25;
   overflow: hidden;
@@ -648,6 +659,24 @@ button,
 
 button:disabled {
   opacity: 0.55;
+}
+
+@media (color) {
+  .item-card-stream:not(.is-read) {
+    border-left: 4px solid #1d5d74;
+  }
+
+  .item-group {
+    padding: 0.05rem 0.3rem;
+    border: 1px solid #8fb4c2;
+    background: #e4f1f5;
+    color: #153f52;
+  }
+
+  .article-header-compact {
+    padding-left: 0.55rem;
+    border-left: 4px solid #1d5d74;
+  }
 }
 
 @media (max-width: 34rem) {

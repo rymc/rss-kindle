@@ -1,5 +1,6 @@
 __pycache__/
 .pytest_cache/
+.ruff_cache/
 .venv/
 .uvenv/
 *.pyc
@@ -9,9 +10,15 @@ __pycache__/
 .env
 AGENTS.md
 AGENTS.local.md
+.git/
+.github/
 source-bridge.toml
 dist/
 build/
+deploy/
+docs/
+examples/
+tests/
 deploy/private/
 deploy/local/
 data/*.db

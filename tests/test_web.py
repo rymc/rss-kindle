@@ -535,6 +535,11 @@ def test_group_and_feed_filters_use_freshrss_navigation(tmp_path: Path):
     assert set(choices) == {"All articles", "Tech"}
     assert str(choices["All articles"]).endswith("/")
     assert str(choices["Tech"]).endswith("/groups/tech")
+    assert category_soup.find("script", src=re.compile(r"/static/reader\.js")) is None
+
+    feeds_page = client.get("/feeds")
+    feeds_soup = BeautifulSoup(feeds_page.text, "html.parser")
+    assert feeds_soup.find("script", src=re.compile(r"/static/reader\.js")) is None
 
 
 def test_removed_routes_are_gone(tmp_path: Path):

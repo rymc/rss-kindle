@@ -1,5 +1,7 @@
 import sys
 
+import pytest
+
 from app.browser_fetch import PersistentBrowserClient, _build_playwright_cookies
 
 
@@ -85,6 +87,12 @@ class _FakeChromium:
         return _FakeBrowser(self.context)
 
 
+class _FailingChromium(_FakeChromium):
+    def connect_over_cdp(self, url: str, *, timeout: int):
+        self.connect_calls.append((url, timeout))
+        raise RuntimeError("CDP unavailable")
+
+
 class _FakePlaywright:
     def __init__(self, chromium: _FakeChromium):
         self.chromium = chromium
@@ -146,3 +154,36 @@ def test_persistent_browser_client_can_attach_over_cdp(monkeypatch):
     assert page.closed is True
     assert context.closed is False
     assert playwright.stopped is True
+
+
+def test_persistent_browser_client_cleans_up_failed_start(monkeypatch):
+    context = _FakeContext()
+    chromium = _FailingChromium(context)
+    playwright = _FakePlaywright(chromium)
+    fake_module = type(
+        "FakeSyncApiModule",
+        (),
+        {"sync_playwright": lambda: _FakePlaywrightStarter(playwright)},
+    )
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_module)
+
+    with pytest.raises(RuntimeError, match="CDP unavailable"):
+        _build_cdp_client().__enter__()
+
+    assert playwright.stopped is True
+
+
+def _build_cdp_client() -> PersistentBrowserClient:
+    return PersistentBrowserClient(
+        profile_path=None,
+        cdp_url="http://browser-cdp:9222",
+        executable_path=None,
+        channel=None,
+        headless=True,
+        launch_args=(),
+        timeout_seconds=12,
+        user_agent="ignored-in-cdp-mode",
+        wait_until="load",
+        wait_for_selector="main",
+        settle_seconds=2,
+    )

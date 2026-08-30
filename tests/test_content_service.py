@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 from app.config import Settings
@@ -136,6 +137,72 @@ def test_failed_extraction_is_cached_and_reused(tmp_path: Path):
     assert repository.get_cached_article(entry.id, entry.url) is not None
 
 
+def test_successful_cache_hit_skips_feed_and_network_extraction(
+    tmp_path: Path,
+    monkeypatch,
+):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    entry = build_entry()
+    initial_html = """
+    <html><body><div class="available-content"><div class="body markup">
+      <p>A complete cached paragraph with enough useful article text to remain valid.</p>
+      <p>A second cached paragraph provides more detail for the reader.</p>
+    </div></div></body></html>
+    """
+    ArticleExtractor(
+        settings,
+        repository,
+        client_factory=lambda: FakeClient(FakeResponse(initial_html)),
+    ).ensure_extracted(entry)
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=fail_if_called,
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_extract_feed_content",
+        lambda _entry: (_ for _ in ()).throw(
+            AssertionError("feed extraction should not run for a valid cache hit")
+        ),
+    )
+
+    article = extractor.ensure_extracted(entry)
+
+    assert article.extraction_status == "success"
+    assert "complete cached paragraph" in article.html
+
+
+def test_changed_feed_content_replaces_successful_cached_article(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    old_entry = replace(
+        build_entry(),
+        content_html=(
+            "<article><p>The original full article has enough useful text for the reader.</p>"
+            "<p>This second paragraph makes the feed content complete.</p></article>"
+        ),
+    )
+    extractor = ArticleExtractor(settings, repository, client_factory=fail_if_called)
+    original = extractor.ensure_extracted(old_entry)
+    updated_entry = replace(
+        old_entry,
+        content_html=(
+            "<article><p>The corrected full article now contains updated facts for the reader.</p>"
+            "<p>This second paragraph confirms that the publisher changed the content.</p></article>"
+        ),
+    )
+
+    corrected = extractor.ensure_extracted(updated_entry)
+
+    assert "original full article" in original.html
+    assert "corrected full article" in corrected.html
+    assert "original full article" not in corrected.html
+
+
 def test_promo_only_extraction_falls_back_instead_of_caching_success(tmp_path: Path):
     repository = Repository(Database(tmp_path / "content.db"))
     repository.initialize()
@@ -235,7 +302,6 @@ def test_failed_cache_is_replaced_when_feed_content_becomes_meaningful(tmp_path:
         entry.id,
         source_url=entry.url,
         extracted_html="<article><h1>Recovered story</h1><p>HTTP 403</p></article>",
-        extracted_text="HTTP 403",
         extraction_status="failed",
         error_message="HTTP 403",
     )
@@ -260,7 +326,11 @@ def test_source_bridge_article_fetch_is_used_when_feed_only_has_teaser(tmp_path:
     repository.initialize()
     settings = build_settings(tmp_path)
     settings = Settings(
-        **{**settings.__dict__, "source_bridge_api_url": "http://source-bridge:8100"}
+        **{
+            **settings.__dict__,
+            "source_bridge_api_url": "http://source-bridge:8100",
+            "source_bridge_access_token": "bridge-token",
+        }
     )
     entry = FreshRSSEntry(
         id="entry-5",
@@ -281,7 +351,6 @@ def test_source_bridge_article_fetch_is_used_when_feed_only_has_teaser(tmp_path:
         entry.id,
         source_url=entry.url,
         extracted_html="<article><h1>Bridge recovered story</h1><p>HTTP 403</p></article>",
-        extracted_text="HTTP 403",
         extraction_status="failed",
         error_message="HTTP 403",
     )

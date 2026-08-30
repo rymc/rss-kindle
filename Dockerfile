@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM python:3.12-slim-bookworm AS reader
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -11,8 +13,11 @@ WORKDIR /app
 RUN groupadd --system --gid 10001 rsskindle \
     && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin rsskindle
 COPY --chown=10001:10001 pyproject.toml uv.lock README.md .env.example source-bridge.example.toml ./
+RUN --mount=type=cache,target=/tmp/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 COPY --chown=10001:10001 app ./app
-RUN mkdir -p /app/data \
+RUN --mount=type=cache,target=/tmp/.cache/uv \
+    mkdir -p /app/data \
     && chown -R 10001:10001 /app/data \
     && uv sync --frozen --no-dev
 EXPOSE 8000
@@ -32,8 +37,11 @@ WORKDIR /app
 RUN groupadd --system --gid 10001 rsskindle \
     && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin rsskindle
 COPY --chown=10001:10001 pyproject.toml uv.lock README.md .env.example source-bridge.example.toml ./
+RUN --mount=type=cache,target=/tmp/.cache/uv \
+    uv sync --frozen --no-dev --extra browser --no-install-project
 COPY --chown=10001:10001 app ./app
-RUN mkdir -p /app/data \
+RUN --mount=type=cache,target=/tmp/.cache/uv \
+    mkdir -p /app/data \
     && chown -R 10001:10001 /app/data \
     && uv sync --frozen --no-dev --extra browser
 EXPOSE 8000 8100

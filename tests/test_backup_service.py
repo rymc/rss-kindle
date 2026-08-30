@@ -40,7 +40,6 @@ def test_backup_is_consistent_downloadable_and_retained(tmp_path: Path):
         "entry-1",
         source_url="https://example.com/story",
         extracted_html="<article><p>Saved body</p></article>",
-        extracted_text="Saved body",
         extraction_status="success",
     )
     bridge_database = settings.database_path.with_name("source_bridge.db")
@@ -79,9 +78,9 @@ def test_backup_is_consistent_downloadable_and_retained(tmp_path: Path):
     restored_database = tmp_path / "restored" / "data" / "rss_kindle.db"
     with sqlite3.connect(restored_database) as connection:
         row = connection.execute(
-            "SELECT extracted_text FROM article_cache WHERE entry_id = 'entry-1'"
+            "SELECT extracted_html FROM article_cache WHERE entry_id = 'entry-1'"
         ).fetchone()
-    assert row == ("Saved body",)
+    assert row == ("<article><p>Saved body</p></article>",)
 
     restored_bridge_database = tmp_path / "restored" / "data" / "source_bridge.db"
     with sqlite3.connect(restored_bridge_database) as connection:

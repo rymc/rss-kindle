@@ -1,6 +1,7 @@
 import base64
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -152,28 +153,12 @@ def test_source_main_accepts_freshrss_http_basic_credentials(tmp_path: Path):
     assert malformed_feed.status_code == 401
 
 
-def test_source_main_fails_closed_when_token_is_not_configured(tmp_path: Path):
+def test_source_main_refuses_to_start_when_token_is_not_configured(tmp_path: Path):
     source_bridge = FakeSourceBridge()
-    app = create_app(build_settings(tmp_path), source_bridge=source_bridge)
-    client = TestClient(app)
 
-    health = client.get("/health")
-    assert health.status_code == 200
-    assert health.json() == {"status": "ok"}
+    with pytest.raises(RuntimeError, match="SOURCE_BRIDGE_ACCESS_TOKEN"):
+        create_app(build_settings(tmp_path), source_bridge=source_bridge)
 
-    blocked_requests = [
-        client.get("/sources"),
-        client.get("/status"),
-        client.post("/sources/ft-home/refresh"),
-        client.get("/synthetic/ft-home.xml"),
-        client.get(
-            "/extract",
-            params={"url": "https://www.ft.com/content/story-1"},
-            headers={"X-Source-Bridge-Token": "unconfigured-token"},
-        ),
-    ]
-
-    assert {response.status_code for response in blocked_requests} == {401}
     assert source_bridge.refresh_calls == []
 
 
@@ -263,12 +248,3 @@ def test_source_main_starts_prewarm_on_startup(tmp_path: Path):
 
     assert source_bridge.schedule_calls
     assert source_bridge.schedule_calls[0] == 7
-
-
-def test_source_main_does_not_prewarm_without_access_token(tmp_path: Path):
-    source_bridge = FakeSourceBridge()
-
-    with TestClient(create_app(build_settings(tmp_path), source_bridge=source_bridge)):
-        pass
-
-    assert source_bridge.schedule_calls == []

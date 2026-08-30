@@ -12,7 +12,9 @@
   var articleEndCue = doc.querySelector("[data-article-end-cue]");
   var articleAdvanceForm = doc.querySelector("[data-article-advance-form]");
   var articleNextPath = articleAdvanceForm && articleAdvanceForm.querySelector("[data-article-next-path]");
-  var readingProgressFrame = 0;
+  var readingProgressTimer = 0;
+  var resizeTimer = 0;
+  var lastProgressPercent = -1;
   var pageViewport = 0;
   var pageMaximum = 0;
   var pageStep = 240;
@@ -20,6 +22,7 @@
   var streamStatus = streamControls && doc.querySelector("[data-stream-page-status]");
   var streamCards = streamList ? streamList.querySelectorAll("[data-entry-card]") : [];
   var streamPages = [];
+  var streamVisibleCards = [];
   var streamPageIndex = 0;
   var streamPageSize = 3;
   var streamGap = 10;
@@ -130,12 +133,17 @@
     var index;
     var firstArticleIndex = 0;
     var visiblePage = streamPages[streamPageIndex] || [];
-    for (index = 0; index < streamCards.length; index += 1) {
-      streamCards[index].classList.remove("is-stream-page-visible");
+    for (index = 0; index < streamVisibleCards.length; index += 1) {
+      if (visiblePage.indexOf(streamVisibleCards[index]) === -1) {
+        streamVisibleCards[index].classList.remove("is-stream-page-visible");
+      }
     }
     for (index = 0; index < visiblePage.length; index += 1) {
-      visiblePage[index].classList.add("is-stream-page-visible");
+      if (streamVisibleCards.indexOf(visiblePage[index]) === -1) {
+        visiblePage[index].classList.add("is-stream-page-visible");
+      }
     }
+    streamVisibleCards = visiblePage;
     if (streamStatus && visiblePage.length) {
       for (index = 0; index < streamPageIndex; index += 1) {
         firstArticleIndex += streamPages[index].length;
@@ -150,14 +158,14 @@
       var knownPages = Math.ceil(knownTotal / streamPageSize);
       var hasMore = Boolean(adjacentUrl(1));
       streamStatus.textContent = "Page " + currentPage + "/" + knownPages + (hasMore ? "+" : "")
-        + " · " + articleRange + "/" + knownTotal + (adjacentUrl(1) ? "+" : "");
+        + " · " + articleRange + "/" + knownTotal + (hasMore ? "+" : "");
       streamStatus.setAttribute(
         "aria-label",
         "Page " + currentPage + " of " + knownPages + (hasMore ? " or more" : "")
           + ", articles " + articleRange + " of " + knownTotal + (hasMore ? " or more" : "")
       );
     }
-    window.scrollTo(0, 0);
+    if ((window.pageYOffset || root.scrollTop || 0) !== 0) window.scrollTo(0, 0);
   }
 
   function measurePage() {
@@ -178,22 +186,25 @@
     var direction;
     for (index = 0; index < turnButtons.length; index += 1) {
       direction = parseInt(turnButtons[index].getAttribute("data-page-turn"), 10);
+      var disabled;
       if (streamControls) {
-        turnButtons[index].disabled = direction > 0
+        disabled = direction > 0
           ? streamPageIndex >= streamPages.length - 1 && !adjacentUrl(direction)
           : streamPageIndex <= 0 && !adjacentUrl(direction);
       } else {
-        turnButtons[index].disabled = direction > 0
+        disabled = direction > 0
           ? current >= pageMaximum - 1 && !adjacentUrl(direction)
           : current <= 0 && !adjacentUrl(direction);
       }
+      if (turnButtons[index].disabled !== disabled) turnButtons[index].disabled = disabled;
     }
   }
 
   function updateArticleEndCue() {
     if (!articleEndCue || streamControls) return;
     var current = window.pageYOffset || root.scrollTop || 0;
-    articleEndCue.hidden = current < pageMaximum - 1;
+    var hidden = current < pageMaximum - 1;
+    if (articleEndCue.hidden !== hidden) articleEndCue.hidden = hidden;
   }
 
   function updatePageControls() {
@@ -220,12 +231,20 @@
 
   function updateReadingProgress() {
     if (!readingProgressFill) return;
+    if (readingProgressTimer) {
+      window.clearTimeout(readingProgressTimer);
+      readingProgressTimer = 0;
+    }
     var current = window.pageYOffset || root.scrollTop || 0;
     var progress = pageMaximum ? Math.min(1, current / pageMaximum) : 1;
-    readingProgressFill.style.transform = "scaleX(" + progress + ")";
-    readingProgress.setAttribute("aria-valuenow", String(Math.round(progress * 100)));
+    var progressPercent = Math.round(progress * 100);
+    if (progressPercent !== lastProgressPercent) {
+      readingProgressFill.style.transform = "scaleX(" + (progressPercent / 100) + ")";
+      readingProgress.setAttribute("aria-valuenow", String(progressPercent));
+      lastProgressPercent = progressPercent;
+    }
     updateArticleEndCue();
-    readingProgressFrame = 0;
+    readingProgressTimer = 0;
   }
 
   function advanceToArticle(nextUrl) {
@@ -238,12 +257,9 @@
   }
 
   function scheduleReadingProgress() {
-    if (!readingProgressFill || readingProgressFrame) return;
-    if (window.requestAnimationFrame) {
-      readingProgressFrame = window.requestAnimationFrame(updateReadingProgress);
-    } else {
-      updateReadingProgress();
-    }
+    if (!readingProgressFill) return;
+    if (readingProgressTimer) window.clearTimeout(readingProgressTimer);
+    readingProgressTimer = window.setTimeout(updateReadingProgress, 120);
   }
 
   function pageTurn(direction) {
@@ -284,7 +300,7 @@
     window.scrollTo(0, target);
     window.setTimeout(function () {
       updateTurnButtons();
-      updateArticleEndCue();
+      updateReadingProgress();
     }, 0);
   }
 
@@ -295,17 +311,26 @@
   }
   updatePageControls();
   updateReadingProgress();
-  window.addEventListener("resize", function () {
-    if (streamControls) {
-      buildStreamPages(false);
-      showStreamPage();
-    }
-    updatePageControls();
-    scheduleReadingProgress();
-  }, false);
-  window.addEventListener("scroll", scheduleReadingProgress, false);
+  if (controls || readingProgressFill) {
+    window.addEventListener("resize", function () {
+      if (resizeTimer) window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(function () {
+        if (streamControls) {
+          buildStreamPages(false);
+          showStreamPage();
+        }
+        updatePageControls();
+        scheduleReadingProgress();
+        resizeTimer = 0;
+      }, 120);
+    }, false);
+  }
+  if (readingProgressFill) {
+    window.addEventListener("scroll", scheduleReadingProgress, false);
+  }
 
   doc.addEventListener("keydown", function (event) {
+    if (!controls) return;
     var target = event.target;
     var tagName = target && target.tagName ? target.tagName.toLowerCase() : "";
     if (tagName === "input" || tagName === "textarea" || tagName === "select") return;

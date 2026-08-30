@@ -125,6 +125,7 @@ def build_template_context(
     active_feed_id: str | None = None,
     show_site_header: bool = True,
     include_feeds: bool = False,
+    reader_script: bool = False,
 ) -> dict[str, Any]:
     groups: list[FreshRSSGroup] = []
     feeds: list[FreshRSSFeed] = []
@@ -161,7 +162,7 @@ def build_template_context(
         "current_user": session.get("sub"),
         "csrf_token": session.get("csrf", ""),
         "is_admin": getattr(request.state, "is_admin", False),
-        "reader_script": True,
+        "reader_script": reader_script,
     }
 
 

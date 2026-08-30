@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS article_cache (
     extraction_status TEXT NOT NULL,
     error_message TEXT,
     extracted_at TEXT NOT NULL,
+    source_fingerprint TEXT,
     PRIMARY KEY (entry_id, source_url)
 );
 
@@ -102,7 +103,18 @@ class Database:
         self._reset_if_legacy_schema()
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            self._add_missing_columns(connection)
             connection.commit()
+
+    @staticmethod
+    def _add_missing_columns(connection: sqlite3.Connection) -> None:
+        article_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(article_cache)")
+        }
+        if "source_fingerprint" not in article_columns:
+            connection.execute(
+                "ALTER TABLE article_cache ADD COLUMN source_fingerprint TEXT"
+            )
 
     def _reset_if_legacy_schema(self) -> None:
         if not self.path.exists():
