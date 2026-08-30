@@ -9,6 +9,17 @@ from urllib.parse import urljoin
 
 
 @dataclass(frozen=True)
+class PageTurnSample:
+    handler_ms: float
+    settle_ms: float
+    mutations: int
+    layout_count: float
+    style_count: float
+    layout_style_ms: float
+    main_thread_ms: float
+
+
+@dataclass(frozen=True)
 class BrowserSample:
     ttfb_ms: float
     first_contentful_paint_ms: float
@@ -20,7 +31,7 @@ class BrowserSample:
     layout_shift: float
     long_task_ms: float
     horizontal_overflow: bool
-    page_turn_settle_ms: float | None
+    page_turn: PageTurnSample | None
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -29,7 +40,11 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[index]
 
 
-def _read_sample(page, *, page_turn_settle_ms: float | None = None) -> BrowserSample:
+def _read_sample(
+    page,
+    *,
+    page_turn: PageTurnSample | None = None,
+) -> BrowserSample:
     values = page.evaluate(
         """() => {
           const navigation = performance.getEntriesByType("navigation")[0];
@@ -65,12 +80,20 @@ def _read_sample(page, *, page_turn_settle_ms: float | None = None) -> BrowserSa
         layout_shift=float(values["layoutShift"]),
         long_task_ms=float(values["longTaskMs"]),
         horizontal_overflow=bool(values["horizontalOverflow"]),
-        page_turn_settle_ms=page_turn_settle_ms,
+        page_turn=page_turn,
     )
 
 
-def _measure_page_turn_settle(page) -> float | None:
-    """Return a coarse two-frame settle time, not e-ink refresh latency."""
+def _cdp_performance_metrics(cdp) -> dict[str, float]:
+    return {
+        metric["name"]: float(metric["value"])
+        for metric in cdp.send("Performance.getMetrics")["metrics"]
+    }
+
+
+def _measure_page_turn(page, cdp) -> PageTurnSample | None:
+    """Return browser-work proxies for one turn, not e-ink refresh metrics."""
+    before = _cdp_performance_metrics(cdp)
     value = page.evaluate(
         """async () => {
           const button = document.querySelector('[data-page-turn="1"]');
@@ -88,15 +111,48 @@ def _measure_page_turn_settle(page) -> float | None:
           ) {
             return null;
           }
+          let mutationCount = 0;
+          const observer = new MutationObserver((records) => {
+            mutationCount += records.length;
+          });
+          observer.observe(document.documentElement, {
+            attributes: true,
+            characterData: true,
+            childList: true,
+            subtree: true
+          });
           const startedAt = performance.now();
           button.click();
+          const handlerFinishedAt = performance.now();
           await new Promise((resolve) => requestAnimationFrame(
             () => requestAnimationFrame(resolve)
           ));
-          return performance.now() - startedAt;
+          mutationCount += observer.takeRecords().length;
+          observer.disconnect();
+          return {
+            handler: handlerFinishedAt - startedAt,
+            settle: performance.now() - startedAt,
+            mutations: mutationCount
+          };
         }"""
     )
-    return float(value) if value is not None else None
+    if value is None:
+        return None
+    after = _cdp_performance_metrics(cdp)
+
+    def delta(name: str) -> float:
+        return max(0.0, after.get(name, 0.0) - before.get(name, 0.0))
+
+    return PageTurnSample(
+        handler_ms=float(value["handler"]),
+        settle_ms=float(value["settle"]),
+        mutations=int(value["mutations"]),
+        layout_count=delta("LayoutCount"),
+        style_count=delta("RecalcStyleCount"),
+        layout_style_ms=(delta("LayoutDuration") + delta("RecalcStyleDuration"))
+        * 1000,
+        main_thread_ms=delta("TaskDuration") * 1000,
+    )
 
 
 def _summary(label: str, values: list[float], unit: str = "ms") -> str:
@@ -190,6 +246,7 @@ def _configure_browser(context, page, args: argparse.Namespace):
     )
     cdp = context.new_cdp_session(page)
     cdp.send("Network.enable")
+    cdp.send("Performance.enable")
     cdp.send("Emulation.setCPUThrottlingRate", {"rate": args.cpu_rate})
     cdp.send(
         "Network.emulateNetworkConditions",
@@ -246,10 +303,15 @@ def _collect_samples(
             if args.cold:
                 cdp.send("Network.clearBrowserCache")
             page.goto(target_url, wait_until="load")
-            page.wait_for_timeout(50)
-            page_turn_settle_ms = _measure_page_turn_settle(page)
+            # Let client-side readers finish their initial view changes before
+            # recording DOM and interaction work.
+            page.wait_for_timeout(500)
+            page_turn = _measure_page_turn(page, cdp)
             samples.append(
-                _read_sample(page, page_turn_settle_ms=page_turn_settle_ms)
+                _read_sample(
+                    page,
+                    page_turn=page_turn,
+                )
             )
 
         context.close()
@@ -290,13 +352,41 @@ def _print_report(
     )
     print(f"Layout shift: max {max(sample.layout_shift for sample in samples):.4f}")
     print(f"Long tasks: max {max(sample.long_task_ms for sample in samples):.1f} ms")
-    page_turns = [
-        sample.page_turn_settle_ms
-        for sample in samples
-        if sample.page_turn_settle_ms is not None
-    ]
+    page_turns = [sample.page_turn for sample in samples if sample.page_turn]
     if page_turns:
-        print(_summary("Two-frame page-turn settle (Chromium proxy)", page_turns))
+        print(
+            _summary(
+                "Page-turn handler (Chromium proxy)",
+                [turn.handler_ms for turn in page_turns],
+            )
+        )
+        print(
+            _summary(
+                "Page-turn main-thread work (Chromium proxy)",
+                [turn.main_thread_ms for turn in page_turns],
+            )
+        )
+        print(
+            _summary(
+                "Page-turn layout and style work (Chromium proxy)",
+                [turn.layout_style_ms for turn in page_turns],
+            )
+        )
+        print(
+            "Page-turn layout/style passes: median "
+            f"{statistics.median(turn.layout_count for turn in page_turns):.0f}/"
+            f"{statistics.median(turn.style_count for turn in page_turns):.0f}"
+        )
+        print(
+            "Page-turn DOM mutations: median "
+            f"{statistics.median(turn.mutations for turn in page_turns):.0f}"
+        )
+        print(
+            _summary(
+                "Two-frame page-turn settle (Chromium proxy)",
+                [turn.settle_ms for turn in page_turns],
+            )
+        )
     print(
         f"Horizontal overflow: {'yes' if any(sample.horizontal_overflow for sample in samples) else 'no'}"
     )
