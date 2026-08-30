@@ -22,10 +22,6 @@
       <time class="item-time" datetime="{{ item.published_at or '' }}">{{ item.published_at|format_relative_time }}</time>
       <span class="meta-sep" aria-hidden="true">|</span>
       <span class="item-source">{{ item.source_label }}</span>
-      {% if item.group_display %}
-      <span class="meta-sep" aria-hidden="true">|</span>
-      <span class="item-group">{{ item.group_display }}</span>
-      {% endif %}
       {% if include_read and item.is_read %}
       <span class="meta-sep" aria-hidden="true">|</span>
       <span class="item-read-state">Read</span>
