@@ -11,7 +11,7 @@
 {% if items %}
 <ul class="item-list" id="stream-start" data-paged-stream data-stream-offset="{{ stream_offset }}" data-empty-message="{{ empty_message }}"{% if request.url.path == '/starred' %} data-starred-view{% endif %}{% if include_read %} data-include-read{% endif %}>
   {% for item in items %}
-  <li class="item-card item-card-stream{% if item.is_read %} is-read{% endif %}" data-entry-card>
+  <li class="item-card item-card-stream{% if item.is_read %} is-read{% endif %}" id="{{ item.list_anchor }}" data-entry-card>
     <form method="post" action="{{ request.url_for(item.is_read and 'mark_item_unread' or 'mark_item_read', entry_id=item.id) }}" class="card-corner-actions"{% if request.url.path == '/starred' %} data-keep-after-read{% endif %}>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_path" value="{{ current_path }}" />

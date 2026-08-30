@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
-<a class="article-home-fixed" href="{{ request.url_for('home') }}" data-home-link aria-label="Home" title="Home"><span aria-hidden="true">⌂</span></a>
+<a class="article-close-fixed" href="{{ return_url }}" data-close-article aria-label="Close article and return to list" title="Back to list"><span aria-hidden="true">×</span></a>
 <article class="article-view" id="article-start">
   <header class="page-header article-header-compact">
     <h2>{{ entry.title }}</h2>
@@ -16,7 +16,7 @@
   </div>
 
   <div class="action-row action-row-bottom">
-    <a class="button-link" href="{{ back_url }}">Back to list</a>
+    <a class="button-link" href="{{ return_url }}">Back to list</a>
     <form method="post" action="{{ request.url_for(entry.is_starred and 'mark_item_unstarred' or 'mark_item_starred', entry_id=entry.id) }}" class="inline-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_path" value="{{ current_path }}" />

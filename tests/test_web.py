@@ -403,8 +403,13 @@ def test_opening_an_article_does_not_mark_it_read_but_advancing_does(
     assert not freshrss.read_calls
 
     opened_soup = BeautifulSoup(opened.text, "html.parser")
+    close_link = opened_soup.select_one("a.article-close-fixed")
     advance_form = opened_soup.select_one("form[data-article-advance-form]")
     end_cue = opened_soup.select_one("[data-article-end-cue]")
+    assert close_link is not None
+    assert str(close_link.get("href")) == "/#entry-g-1"
+    stream_soup = BeautifulSoup(stream.text, "html.parser")
+    assert stream_soup.select_one("#entry-g-1[data-entry-card]") is not None
     assert advance_form is not None
     assert end_cue is not None
     assert "End of article" in end_cue.get_text(" ", strip=True)
@@ -662,15 +667,15 @@ def test_article_has_cached_script_and_progressive_page_controls(tmp_path: Path)
     script = soup.find("script", src=re.compile(r"/static/reader\.js\?v="))
     controls = soup.select_one('.page-turn-rails[hidden][data-page-mode="article"]')
     progress = soup.select_one('[data-reading-progress][role="progressbar"]')
-    home_link = soup.select_one("a.article-home-fixed")
+    close_link = soup.select_one("a.article-close-fixed")
 
     assert script is not None
     assert controls is not None
     assert len(controls.find_all("button")) == 2
     assert progress is not None
     assert progress.get("aria-valuenow") == "0"
-    assert home_link is not None
-    assert str(home_link.get("href")).endswith("/")
+    assert close_link is not None
+    assert str(close_link.get("href")).endswith("/#entry-g-1")
     assert "script-src 'self'" in response.headers["content-security-policy"]
 
 
