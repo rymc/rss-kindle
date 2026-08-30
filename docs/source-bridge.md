@@ -32,13 +32,18 @@ At a high level, the bridge:
 - `/synthetic/{source_id}.xml`: synthetic RSS feed endpoint for FreshRSS
 - `/extract`: private helper endpoint used by `rss-kindle` for authenticated extraction fallback
 
-When `SOURCE_BRIDGE_ACCESS_TOKEN` is set, all endpoints except `/health` require either:
+All endpoints except `/health` require `SOURCE_BRIDGE_ACCESS_TOKEN`. The bridge returns `401` for protected requests if the configured token or the request token is absent. It also skips background prewarming when the configured token is absent.
+
+Clients can send the token with one of these methods:
 
 - `X-Source-Bridge-Token: <token>`
 - `Authorization: Bearer <token>`
+- HTTP Basic authentication with username `source-bridge` and the token as the password
 - `?access_token=<token>`
 
-Treat `/extract` as a private helper endpoint, not a public article proxy.
+Use HTTP Basic authentication for FreshRSS feed subscriptions. Do not put the token in a feed URL because URLs can appear in logs and history. Treat `/extract` as a private helper endpoint, not a public article proxy.
+
+`/health` does not require authentication so container health checks can use it. Its response contains only a generic status.
 
 ## Runtime Model
 
@@ -60,21 +65,25 @@ From the repo root:
 
 ```bash
 cp source-bridge.example.toml source-bridge.toml
+export SOURCE_BRIDGE_ACCESS_TOKEN="$(openssl rand -hex 32)"
 docker compose up --build -d source-bridge
 ```
 
-FreshRSS can then subscribe to:
+Connect FreshRSS to the same Docker network. It can then subscribe to:
 
 ```text
-http://<host>:8100/synthetic/{source_id}.xml
+http://source-bridge:8100/synthetic/{source_id}.xml
 ```
+
+Set the feed HTTP username to `source-bridge`. Set its HTTP password to the value of `SOURCE_BRIDGE_ACCESS_TOKEN`.
 
 ### Local Development
 
 ```bash
 cp source-bridge.example.toml source-bridge.toml
 uv sync --extra dev
-uv run uvicorn app.source_main:create_app --factory --reload --port 8100
+SOURCE_BRIDGE_ACCESS_TOKEN=dev-only-token \
+  uv run uvicorn app.source_main:create_app --factory --reload --port 8100
 ```
 
 ## Configuration File
@@ -152,7 +161,7 @@ max_items = 20
 refresh_seconds = 900
 ```
 
-That publishes:
+For a local development server on port `8100`, that source is available at:
 
 ```text
 http://127.0.0.1:8100/synthetic/example-home.xml
@@ -202,15 +211,16 @@ If a browser-backed source looks stale or wrong, test the same profile headful f
 | `SOURCE_BRIDGE_REFRESH_SECONDS` | no | default feed freshness window | `900` |
 | `SOURCE_BRIDGE_PREWARM_ENABLED` | no | whether to refresh sources proactively in the background | `true` |
 | `SOURCE_BRIDGE_PREWARM_INTERVAL_SECONDS` | no | how often the prewarm loop checks sources | `60` |
-| `SOURCE_BRIDGE_ACCESS_TOKEN` | no | optional shared token for protecting bridge endpoints | unset |
+| `SOURCE_BRIDGE_ACCESS_TOKEN` | yes | shared token for all bridge endpoints except `/health` | none; protected access and prewarming are disabled when unset |
 | `APP_ALLOWED_HOSTS` | no | comma-separated hostnames allowed by the bridge | unset |
 | `HTTP_TIMEOUT_SECONDS` | no | outbound HTTP timeout | `20` |
 | `USER_AGENT` | no | outbound user agent for HTTP fetching | `rss-kindle/0.2 (+https://example.invalid; self-hosted personal reader)` |
 
 ## Security And Privacy
 
-- keep `source-bridge` on a trusted LAN when possible
-- if you expose it, set `SOURCE_BRIDGE_ACCESS_TOKEN` or put it behind your own reverse proxy auth
+- keep `source-bridge` on its Docker network instead of publishing port `8100` to the host
+- set `SOURCE_BRIDGE_ACCESS_TOKEN`; the bridge denies protected requests when the token is absent
+- use FreshRSS HTTP credentials instead of putting the token in a feed URL
 - keep `source-bridge.toml`, cookies, and browser profiles out of git
 - keep browser auth material out of public container images and build contexts
 - use dedicated automation browser profiles instead of reusing your daily browser profile

@@ -11,6 +11,7 @@ x-app-image: &app-image
     - no-new-privileges:true
   cap_drop:
     - ALL
+  init: true
   restart: unless-stopped
 
 services:
@@ -57,10 +58,10 @@ services:
       - rss-kindle
 
   freshrss:
-    image: freshrss/freshrss:latest
+    image: freshrss/freshrss:1.29.1
     container_name: freshrss
     ports:
-      - "8081:80"
+      - "127.0.0.1:8081:80"
     volumes:
       - ${FRESHRSS_DATA_DIR:-/srv/freshrss/data}:/var/www/FreshRSS/data
       - ${FRESHRSS_EXTENSIONS_DIR:-/srv/freshrss/extensions}:/var/www/FreshRSS/extensions

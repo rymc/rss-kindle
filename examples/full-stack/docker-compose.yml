@@ -7,6 +7,7 @@ x-app-common: &app-common
     - no-new-privileges:true
   cap_drop:
     - ALL
+  init: true
   restart: unless-stopped
 
 x-reader-image: &reader-image
@@ -45,7 +46,7 @@ services:
       APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-true}
       APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
       SOURCE_BRIDGE_API_URL: ${SOURCE_BRIDGE_API_URL:-http://source-bridge:8100}
-      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
+      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:?set SOURCE_BRIDGE_ACCESS_TOKEN}
       MAX_STREAM_ITEMS: ${MAX_STREAM_ITEMS:-15}
       METADATA_CACHE_SECONDS: ${METADATA_CACHE_SECONDS:-60}
       ENTRY_CACHE_SECONDS: ${ENTRY_CACHE_SECONDS:-300}
@@ -81,7 +82,7 @@ services:
     environment:
       DATABASE_PATH: /app/data/source_bridge.db
       SOURCE_BRIDGE_CONFIG_PATH: /app/source-bridge.toml
-      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
+      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:?set SOURCE_BRIDGE_ACCESS_TOKEN}
       APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
       SOURCE_BRIDGE_REFRESH_SECONDS: ${SOURCE_BRIDGE_REFRESH_SECONDS:-900}
       SOURCE_BRIDGE_PREWARM_ENABLED: ${SOURCE_BRIDGE_PREWARM_ENABLED:-true}
@@ -98,12 +99,10 @@ services:
       - rss-kindle
 
   freshrss:
-    image: freshrss/freshrss:latest
+    image: freshrss/freshrss:1.29.1
     container_name: freshrss
     expose:
       - "80"
-    ports:
-      - "8081:80"
     volumes:
       - ${FRESHRSS_DATA_DIR:-/srv/freshrss/data}:/var/www/FreshRSS/data
       - ${FRESHRSS_EXTENSIONS_DIR:-/srv/freshrss/extensions}:/var/www/FreshRSS/extensions
@@ -115,7 +114,7 @@ services:
       - rss-kindle
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.4-alpine
     container_name: rss-kindle-caddy
     depends_on:
       - rss-kindle
@@ -126,6 +125,15 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     restart: unless-stopped
     networks:
       - rss-kindle

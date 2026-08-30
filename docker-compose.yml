@@ -7,6 +7,7 @@ x-app-common: &app-common
     - no-new-privileges:true
   cap_drop:
     - ALL
+  init: true
   restart: unless-stopped
 
 x-reader-image: &reader-image
@@ -103,8 +104,8 @@ services:
     <<: *browser-image
     container_name: rss-kindle-source-bridge
     command: ["uvicorn", "app.source_main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8100"]
-    ports:
-      - "8100:8100"
+    expose:
+      - "8100"
     shm_size: "1gb"
     volumes:
       - ./data:/app/data
@@ -112,7 +113,7 @@ services:
     environment:
       DATABASE_PATH: /app/data/source_bridge.db
       SOURCE_BRIDGE_CONFIG_PATH: /app/source-bridge.toml
-      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:-}
+      SOURCE_BRIDGE_ACCESS_TOKEN: ${SOURCE_BRIDGE_ACCESS_TOKEN:?set SOURCE_BRIDGE_ACCESS_TOKEN}
       APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
       SOURCE_BRIDGE_REFRESH_SECONDS: ${SOURCE_BRIDGE_REFRESH_SECONDS:-900}
       SOURCE_BRIDGE_PREWARM_ENABLED: ${SOURCE_BRIDGE_PREWARM_ENABLED:-true}

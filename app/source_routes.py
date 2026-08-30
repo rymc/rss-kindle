@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -48,9 +50,7 @@ class SourceBridgeController:
         )
 
     def health(self) -> JSONResponse:
-        return JSONResponse(
-            {"status": "ok", "source_count": len(self.source_bridge.list_sources())}
-        )
+        return JSONResponse({"status": "ok"})
 
     def sources(self, request: Request) -> list[dict[str, object]]:
         self._authorize(request)
@@ -116,10 +116,12 @@ class SourceBridgeController:
 
     def _authorize(self, request: Request) -> None:
         expected = self.settings.source_bridge_access_token
-        if not expected:
-            return
         submitted = _submitted_token(request)
-        if submitted is None or not hmac.compare_digest(submitted, expected):
+        if (
+            not expected
+            or not submitted
+            or not hmac.compare_digest(submitted, expected)
+        ):
             raise HTTPException(
                 status_code=401,
                 detail="Missing or invalid source bridge token.",
@@ -130,6 +132,21 @@ def _submitted_token(request: Request) -> str | None:
     auth_header = request.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
         return auth_header[7:].strip() or None
+    if auth_header.lower().startswith("basic "):
+        try:
+            decoded = base64.b64decode(
+                auth_header[6:].strip(),
+                validate=True,
+            ).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            return None
+        username, separator, password = decoded.partition(":")
+        if (
+            separator
+            and hmac.compare_digest(username, "source-bridge")
+            and password
+        ):
+            return password
     return request.headers.get("x-source-bridge-token") or request.query_params.get(
         "access_token"
     )
