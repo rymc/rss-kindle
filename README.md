@@ -19,6 +19,40 @@ FreshRSS still handles subscriptions, polling, unread state, and stars. RSS Kind
 - A small dashboard for health, devices, bridge refreshes, and backups
 - An optional source bridge for sites with missing, incomplete, or protected feeds
 
+## Optimized for Kindle
+
+RSS Kindle is designed for the Kindle browser and e-ink display. It avoids long scrolling pages and keeps browser work small.
+
+The list loads 15 articles at once and presents them as five pages of three cards. The first page comes from the server. The next four page turns need no network request. Article page turns also remain local until the reader moves to another article.
+
+The interface also:
+
+- compresses HTML, CSS, and JavaScript
+- caches static assets and FreshRSS responses
+- removes images and other media from articles
+- avoids animations, smooth scrolling, and web fonts
+- limits third-party browser requests
+- changes only the cards and controls needed for a page turn
+
+### Browser benchmark
+
+This benchmark compares the default FreshRSS 1.29.1 interface with RSS Kindle at `27f306f`. Both used the same FreshRSS account, default settings, and 15 unread articles. Both ran behind the same Caddy proxy with gzip enabled.
+
+Chromium ran at 600 × 800 with 6× CPU slowdown, 150 ms added latency, and a 1 Mbit/s connection. Each result is the median of 10 loads after one warmup load. CPU throttling exposes expensive browser work; it does not simulate a specific Kindle processor.
+
+| Metric | FreshRSS | RSS Kindle | Difference |
+| --- | ---: | ---: | ---: |
+| Cold transferred data | 117.3 KB | 9.1 KB | 92% less |
+| Warm transferred data | 6.6 KB | 2.3 KB | 65% less |
+| Cold resource requests | 22 | 3 | 86% fewer |
+| Cold first contentful paint | 580 ms | 410 ms | 170 ms lower |
+
+A warm load keeps the browser's cached CSS, JavaScript, and other assets. A cold load clears that browser cache before each measurement. Both services remain running and signed in.
+
+[First Contentful Paint](https://www.w3.org/TR/paint-timing/) measures when Chromium first renders text or an image. It does not measure the Kindle panel's physical refresh. E-ink refresh time also depends on the display controller, waveform, temperature, and whether the device performs a full or partial update.
+
+These results therefore measure network and browser work, not exact Kindle page-turn time. Transferred data, request count, and network-free page turns apply directly to the Kindle experience. The Chromium paint result is a controlled comparison of the work completed before the e-ink display updates.
+
 ## Requirements
 
 - Docker, or Python 3.11+ with [uv](https://docs.astral.sh/uv/)
@@ -188,7 +222,13 @@ Run a repeatable server benchmark against a reader instance:
 uv run rss-kindle-benchmark https://reader.example.com --path / --requests 20
 ```
 
-Desktop benchmarks help catch regressions, but they do not reproduce e-ink refresh time. Check interaction and page turns on a physical Kindle before a release.
+Run the throttled browser benchmark:
+
+```bash
+uv run rss-kindle-browser-benchmark https://reader.example.com --path / --requests 10 --cold
+```
+
+The browser benchmark reports load, transfer, DOM, layout shift, long tasks, and page-turn layout, style, mutation, and main-thread work. It helps catch regressions but does not reproduce e-ink refresh time. Check interaction and page turns on a physical Kindle before a release.
 
 ## License
 
