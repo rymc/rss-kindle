@@ -199,6 +199,8 @@
     controls.hidden = !(hasOverflow || hasAdjacentPage);
     root.classList.toggle("has-page-turns", !controls.hidden && !sideControls);
     root.classList.toggle("has-page-turn-rails", !controls.hidden && sideControls);
+    // Side rails narrow the article and can add wrapped lines.
+    if (!controls.hidden) measurePage();
     updateTurnButtons();
     updateArticleEndCue();
   }
@@ -253,6 +255,7 @@
       }
       return;
     }
+    measurePage();
     var current = window.pageYOffset || root.scrollTop || 0;
     var nextUrl = adjacentUrl(direction);
     var target;
