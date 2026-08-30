@@ -410,10 +410,13 @@ def test_opening_an_article_does_not_mark_it_read_but_advancing_does(
 
     opened_soup = BeautifulSoup(opened.text, "html.parser")
     close_link = opened_soup.select_one("a.article-close-fixed")
+    original_link = opened_soup.find("a", string="Open original")
     advance_form = opened_soup.select_one("form[data-article-advance-form]")
     end_cue = opened_soup.select_one("[data-article-end-cue]")
     assert close_link is not None
     assert str(close_link.get("href")) == "/#entry-g-1"
+    assert original_link is not None
+    assert "button-link" in original_link.get("class", [])
     stream_soup = BeautifulSoup(stream.text, "html.parser")
     assert stream_soup.select_one("#entry-g-1[data-entry-card]") is not None
     assert advance_form is not None

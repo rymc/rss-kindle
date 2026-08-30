@@ -497,9 +497,9 @@ button,
   width: 2.75rem;
   height: 2.75rem;
   padding: 0;
-  border: 1px solid #315f70;
+  border: 0;
   outline: 0;
-  background: #fff;
+  background: transparent;
   box-shadow: none;
   color: #315f70;
   font-family: "Amazon Ember", Arial, Helvetica, sans-serif;
@@ -525,7 +525,7 @@ button,
 .article-corner-action:focus,
 .article-corner-action:active {
   outline: 0;
-  background: #eaf4f7;
+  background: transparent;
   box-shadow: none;
 }
 
@@ -552,7 +552,12 @@ button,
 }
 
 .action-row-bottom {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
   margin-top: 1.5rem;
+  align-items: stretch;
+  justify-content: center;
 }
 
 .login-shell {
@@ -601,15 +606,9 @@ button,
   color: #111;
 }
 
-.action-row-bottom .inline-form,
-.action-row-bottom .button-link {
-  margin-right: 0.45rem;
-  margin-bottom: 0.45rem;
-}
-
-.article-source-bottom {
-  margin: 0 0 0.55rem;
-  font-size: 0.84rem;
+.action-row-bottom .inline-form {
+  display: flex;
+  margin: 0;
 }
 
 .article-star-button.is-active {
