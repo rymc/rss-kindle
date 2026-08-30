@@ -52,7 +52,6 @@ class StreamItemView:
     is_starred: bool
     open_url: str
     source_label: str
-    group_display: str
     comments_url: str | None
     summary_is_comments: bool
     is_read: bool
@@ -348,10 +347,7 @@ class ReaderController:
         context_id = self.services.repository.save_reading_context(
             reading_context.encode()
         )
-        items = [
-            self._stream_item(entry, context_id, active_group_slug)
-            for entry in page.entries
-        ]
+        items = [self._stream_item(entry, context_id) for entry in page.entries]
         document_title = (
             "All articles"
             if scope.kind == "home" and stream_request.include_read
@@ -463,6 +459,7 @@ class ReaderController:
                 "source_label": source_label,
                 "fallback_used": article.extraction_status == "failed",
                 "error_message": article.error_message,
+                "body_class": "article-page",
                 "back_url": back_url,
                 "return_url": f"{back_url}#entry-{article_key(entry.id)}",
                 "previous_url": navigation.previous_url,
@@ -554,13 +551,7 @@ class ReaderController:
         self,
         entry: FreshRSSEntry,
         context_id: str,
-        active_group_slug: str | None,
     ) -> StreamItemView:
-        group_display = (
-            ""
-            if active_group_slug and len(entry.group_names) == 1
-            else ", ".join(entry.group_names)
-        )
         comments_url = extract_hacker_news_comments_url(
             summary_html=entry.summary_html,
             content_html=entry.content_html,
@@ -576,7 +567,6 @@ class ReaderController:
             is_starred=entry.is_starred,
             open_url=item_detail_url(self.app, entry.id, context_id),
             source_label=compact_source_label(entry.feed_title, entry.feed_site_url),
-            group_display=group_display,
             comments_url=comments_url,
             summary_is_comments=bool(comments_url)
             and is_comments_only_summary(entry.summary_text),

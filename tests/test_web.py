@@ -352,6 +352,12 @@ def test_home_reads_from_freshrss_and_mark_read_hides_item(tmp_path: Path):
     assert response.status_code == 200
     assert "Second story" in response.text
     assert "First story" in response.text
+    assert not any(
+        label.get_text(strip=True) == "Tech"
+        for label in BeautifulSoup(response.text, "html.parser").select(
+            "[data-entry-card] .item-meta span"
+        )
+    )
 
     hide = client.post(
         f"/items/{freshrss_item_id('1')}/read",
@@ -520,6 +526,15 @@ def test_group_and_feed_filters_use_freshrss_navigation(tmp_path: Path):
     assert selected_group.get_text(strip=True) == "Tech"
     assert str(selected_group.get("href")).endswith("/categories")
 
+    group_article = client.get(extract_text_link(group_page.text, "Second story"))
+    article_soup = BeautifulSoup(group_article.text, "html.parser")
+    home_link = article_soup.select_one("a.article-home-fixed")
+    close_link = article_soup.select_one("a.article-close-fixed")
+    assert home_link is not None
+    assert str(home_link.get("href")).endswith("/")
+    assert close_link is not None
+    assert str(close_link.get("href")) == "/groups/tech#entry-g-2"
+
     feed_page = client.get(f"/feeds/{feed_token}")
     assert feed_page.status_code == 200
     assert "Second story" in feed_page.text
@@ -651,8 +666,13 @@ def test_stream_has_progressive_book_style_page_controls(tmp_path: Path):
 
     response = client.get("/")
     soup = BeautifulSoup(response.text, "html.parser")
+    menu = soup.select_one("details.reader-menu")
     controls = soup.select_one('.page-turn-rails[hidden][data-page-mode="stream"]')
 
+    assert menu is not None
+    assert not menu.has_attr("open")
+    assert menu.select_one("summary") is not None
+    assert menu.select_one("nav") is not None
     assert controls is not None
     assert [button.get("data-page-turn") for button in controls.find_all("button")] == [
         "-1",

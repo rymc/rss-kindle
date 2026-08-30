@@ -260,9 +260,11 @@ flowchart LR
 
 The list view shows three article cards at a time and loads 15 articles per server batch by default. Select the left or right side control to move to newer or older cards. The page and article range in the header show your position. A `+` after a total means that FreshRSS has more articles that the reader has not loaded yet. When you reach the end of a batch, the right control loads the next one. The left control returns to batches that you already passed; it does not discard them.
 
+The reader header stays in one compact row. Select **Menu** to show **All**, **Categories**, **Starred**, **Feeds**, **Show read** or **Hide read**, and account controls. The menu overlays the article cards, so it does not resize the list.
+
 Use **Categories** to open a picker with large touch targets. Use **Show read** and **Hide read** to control whether read articles appear. Select the checkmark on a card to mark that article as read. In the read view, select the return arrow to mark it unread.
 
-In an article, the side controls move by one screen. A thin bar at the top shows reading progress, and the home icon returns to the article list. At the final screen, an end notice names the next article. Select the right control again to mark the current article as read and open the next one. Opening an article by itself does not mark it as read.
+In an article, the side controls move by one screen. A thin bar at the top shows reading progress. The Home control opens **All articles**. The × control closes the article and returns to its original list and card. At the final screen, an end notice names the next article. Select the right control again to mark the current article as read and open the next one. Opening an article by itself does not mark it as read.
 
 ## Optional: Add `source-bridge`
 

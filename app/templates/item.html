@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 
 {% block content %}
-<a class="article-close-fixed" href="{{ return_url }}" data-close-article aria-label="Close article and return to list" title="Back to list"><span aria-hidden="true">×</span></a>
+<nav class="article-corner-actions" aria-label="Article navigation">
+  <a class="article-corner-action article-home-fixed" href="{{ request.url_for('home') }}" aria-label="Home" title="Home"><span aria-hidden="true">⌂</span></a>
+  <a class="article-corner-action article-close-fixed" href="{{ return_url }}" data-close-article aria-label="Close article and return to list" title="Close article"><span aria-hidden="true">×</span></a>
+</nav>
 <article class="article-view" id="article-start">
   <header class="page-header article-header-compact">
     <h2>{{ entry.title }}</h2>
@@ -40,7 +43,7 @@
   <input type="hidden" name="next_path" value="{{ next_url }}" data-article-next-path />
 </form>
 {% endif %}
-<nav class="page-turn-rails" aria-label="Article page controls" data-page-mode="article" data-page-previous-url="{{ previous_url or '' }}" data-page-next-url="{{ next_url or '' }}" hidden>
+<nav class="page-turn-rails page-turn-rails-article" aria-label="Article page controls" data-page-mode="article" data-page-previous-url="{{ previous_url or '' }}" data-page-next-url="{{ next_url or '' }}" hidden>
   <button type="button" class="page-turn-rail page-turn-rail-previous" data-page-turn="-1" aria-label="Previous page" title="Previous page">‹</button>
   <button type="button" class="page-turn-rail page-turn-rail-next" data-page-turn="1" aria-label="Next page" title="Next page">›</button>
 </nav>
