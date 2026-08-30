@@ -1,20 +1,31 @@
-# Reader + FreshRSS Example
+# RSS Kindle with FreshRSS
 
-This directory is the middle deployment path:
+This example runs RSS Kindle and FreshRSS on one Docker network. Use it when you want to host both services but do not need the source bridge.
 
-- `rss-kindle`
-- FreshRSS
+## Before you start
 
-Use it when:
+Review [`docker-compose.yml`](docker-compose.yml). In particular, set the persistent data paths and timezone for your host.
 
-- you want to self-host FreshRSS and the Kindle reader together
-- you do not need `source-bridge` yet
-- you want something simpler than the full stack example
+The RSS Kindle container uses UID and GID `1000` by default. Make sure that user can write to `RSS_KINDLE_DATA_DIR`, or set `RSS_KINDLE_UID` and `RSS_KINDLE_GID`.
 
-Follow [the reader and FreshRSS setup in the main README](../../README.md#path-b-you-want-to-self-host-freshrss-too) for startup commands and verification URLs.
+## Start the services
 
-Review [`docker-compose.yml`](docker-compose.yml) before using it, especially the volume paths, timezone, and FreshRSS credentials for `rss-kindle`.
+Start FreshRSS first:
 
-The reader container uses the numeric user and group set by `RSS_KINDLE_UID` and `RSS_KINDLE_GID`. Both default to `1000`. Make sure that user can write to `RSS_KINDLE_DATA_DIR`.
+```bash
+docker compose -f examples/reader-with-freshrss/docker-compose.yml up -d freshrss
+```
 
-If you later need bridged sites, use the [full-stack example](../full-stack).
+Open [http://127.0.0.1:8081](http://127.0.0.1:8081) and complete the FreshRSS setup. Enable API access for the account that RSS Kindle will use.
+
+Then start RSS Kindle with the FreshRSS account name and API password:
+
+```bash
+FRESHRSS_USERNAME=reader \
+FRESHRSS_API_PASSWORD=replace-me \
+docker compose -f examples/reader-with-freshrss/docker-compose.yml up --build -d rss-kindle
+```
+
+Open RSS Kindle at [http://127.0.0.1:8000](http://127.0.0.1:8000).
+
+See the main [README](../../README.md) for app authentication, Kindle pairing, and other settings. If you need browser-backed or synthetic feeds, use the [full-stack example](../full-stack).
