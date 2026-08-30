@@ -1,35 +1,33 @@
-# Deployment
+# Deployment notes
 
-Keep environment-specific deployment overlays out of git.
+The Compose files in this repository are portable examples. Keep settings for a real host in a private repository or an ignored directory such as `deploy/private/`.
 
-Use the committed root `docker-compose.yml` and the examples under `examples/`
-as the portable base.
+Do not commit:
 
-Keep real deployment files such as:
+- `.env` files
+- host-specific Compose files
+- real domains, LAN addresses, or machine notes
+- `source-bridge.toml`
+- cookies or exported request headers
+- browser profiles
 
-- host-specific Compose overlays
-- reverse-proxy configs with real domains
-- real `.env` files
-- real `source-bridge.toml` files
-- cookie/header files
-- browser-profile directories
-- LAN IPs or machine inventory notes
-- local operator notes such as `AGENTS.local.md`
+## Container permissions
 
-in a separate private ops repo or in a gitignored directory such as:
+RSS Kindle runs with a read-only root filesystem and no Linux capabilities. The app uses UID and GID `1000` by default.
 
-- `deploy/private/`
-- `deploy/local/`
+Make sure this user can write to each persistent directory. Set `RSS_KINDLE_UID` and `RSS_KINDLE_GID` if your host uses a different owner.
 
-## Host-Neutral Deployment And Backups
+## Backups
 
-Run the Docker Compose stack on a host, VM, or container platform that supports persistent volumes. Do not run the application as root. The shipped Compose files use a read-only root filesystem, remove Linux capabilities, and set a numeric user and group.
+Use both of these backup methods:
 
-Prepare the persistent directories so that this user can write to them. The default is UID and GID `1000`. Set `RSS_KINDLE_UID` and `RSS_KINDLE_GID` if the host uses different values.
+1. Back up the persistent volumes and private configuration to another machine or storage service. Use a consistent volume snapshot or stop the services during the copy.
+2. Create an RSS Kindle archive from the dashboard or run:
 
-Use two backup layers on any host:
+   ```bash
+   docker compose exec rss-kindle python -m app.backup_cli
+   ```
 
-1. Configure your host or storage provider to copy all persistent volumes and private config to separate storage on a schedule. Use a consistent volume snapshot or stop the services during the copy.
-2. Create RSS Kindle application archives from `/dashboard` or with `docker compose exec rss-kindle python -m app.backup_cli`. Copy important archives to storage outside the deployment.
+The application archive contains the RSS Kindle database and, when available, the source bridge database. It does not contain FreshRSS data, environment variables, cookies, browser profiles, or private configuration.
 
-Do not treat the application archive as a complete deployment backup. It excludes FreshRSS data, `.env` secrets, cookies, and browser profiles. This design keeps the archive portable across a local server, a VM, and a cloud host.
+Copy important application archives away from the deployment host. Do not use them as your only backup.
