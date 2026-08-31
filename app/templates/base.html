@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en"{% if items is defined and items and ((items|length > 3) or (newer_url|default(false)) or (older_url|default(false))) %} class="has-page-turn-gutter"{% endif %}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -7,7 +7,6 @@
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}?v={{ static_versions['style.css'] }}" />
     {% if admin_styles %}<link rel="stylesheet" href="{{ request.url_for('static', path='admin.css') }}?v={{ static_versions['admin.css'] }}" />{% endif %}
-    {% if reader_script %}<script src="{{ request.url_for('static', path='reader.js') }}?v={{ static_versions['reader.js'] }}" defer></script>{% endif %}
   </head>
   <body{% if body_class %} class="{{ body_class }}"{% endif %}>
     {% if show_site_header is not defined %}{% set show_site_header = true %}{% endif %}
@@ -25,9 +24,7 @@
         <div class="reader-menu-panel">
           <nav class="kindle-group-nav" aria-label="Reader views">
             <a href="{{ request.url_for('home') }}" class="{% if request.url.path == '/' %}active{% endif %}"{% if request.url.path == '/' %} aria-current="page"{% endif %}>All</a>
-            {% if groups %}
             <a href="{{ request.url_for('categories_view') }}" class="category-picker-link{% if active_group_slug or request.url.path == '/categories' %} active{% endif %}"{% if request.url.path == '/categories' %} aria-current="page"{% endif %}>{{ active_group_name or 'Categories' }}</a>
-            {% endif %}
             <a href="{{ request.url_for('starred_view') }}" class="{% if request.url.path == '/starred' %}active{% endif %}"{% if request.url.path == '/starred' %} aria-current="page"{% endif %}>Starred</a>
             <a href="{{ request.url_for('feeds_index') }}" class="{% if request.url.path == '/feeds' or active_feed_id %}active{% endif %}"{% if request.url.path == '/feeds' or active_feed_id %} aria-current="page"{% endif %}>Feeds</a>
             {% if read_toggle_url %}
@@ -56,5 +53,6 @@
     <main class="content">
       {% block content %}{% endblock %}
     </main>
+    {% if reader_script %}<script src="{{ request.url_for('static', path='reader.js') }}?v={{ static_versions['reader.js'] }}"></script>{% endif %}
   </body>
 </html>

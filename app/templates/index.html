@@ -9,29 +9,31 @@
 {% endif %}
 
 {% if items %}
-<ul class="item-list" id="stream-start" data-paged-stream data-stream-offset="{{ stream_offset }}" data-empty-message="{{ empty_message }}"{% if request.url.path == '/starred' %} data-starred-view{% endif %}{% if include_read %} data-include-read{% endif %}>
+<ul class="item-list" id="stream-start" data-paged-stream data-stream-offset="{{ stream_offset }}" data-empty-message="{{ empty_message }}"{% if request.url.path == '/starred' %} data-starred-view data-preserve-read-items{% endif %}{% if include_read %} data-include-read data-preserve-read-items{% endif %}>
   {% for item in items %}
   <li class="item-card item-card-stream{% if item.is_read %} is-read{% endif %}" id="{{ item.list_anchor }}" data-entry-card>
-    <form method="post" action="{{ request.url_for(item.is_read and 'mark_item_unread' or 'mark_item_read', entry_id=item.id) }}" class="card-corner-actions"{% if request.url.path == '/starred' %} data-keep-after-read{% endif %}>
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <input type="hidden" name="next_path" value="{{ current_path }}" />
-      <button type="submit" formaction="{{ request.url_for(item.is_starred and 'mark_item_unstarred' or 'mark_item_starred', entry_id=item.id) }}" data-quick-action="{% if item.is_starred %}unstar{% else %}star{% endif %}" class="card-corner-button card-corner-button-star {% if item.is_starred %}is-active{% endif %}" aria-label="{% if item.is_starred %}Unstar{% else %}Star{% endif %} {{ item.title }}">{% if item.is_starred %}★{% else %}☆{% endif %}</button>
-      <button type="submit" formaction="{{ request.url_for(item.is_read and 'mark_item_unread' or 'mark_item_read', entry_id=item.id) }}"{% if not include_read %} data-quick-action="read"{% endif %} class="card-corner-button card-corner-button-read{% if item.is_read %} is-active{% endif %}" aria-label="Mark {{ item.title }} as {% if item.is_read %}unread{% else %}read{% endif %}" title="Mark as {% if item.is_read %}unread{% else %}read{% endif %}">{% if item.is_read %}↶{% else %}✓{% endif %}</button>
-    </form>
+    <div class="card-corner-actions">
+      <form method="post" action="{{ request.url_for('change_item_state', entry_id=item.id) }}" class="card-corner-form" data-state-form>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_path" value="{{ current_path }}" />
+        <button type="submit" name="state_action" value="{% if item.is_starred %}unstar{% else %}star{% endif %}" data-quick-action="{% if item.is_starred %}unstar{% else %}star{% endif %}" class="card-corner-button card-corner-button-star {% if item.is_starred %}is-active{% endif %}" aria-label="{% if item.is_starred %}Unstar{% else %}Star{% endif %} {{ item.title }}">{% if item.is_starred %}★{% else %}☆{% endif %}</button>
+        <button type="submit" name="state_action" value="{% if item.is_read %}unread{% else %}read{% endif %}" data-quick-action="{% if item.is_read %}unread{% else %}read{% endif %}" class="card-corner-button card-corner-button-read{% if item.is_read %} is-active{% endif %}" aria-label="Mark {{ item.title }} as {% if item.is_read %}unread{% else %}read{% endif %}" title="Mark as {% if item.is_read %}unread{% else %}read{% endif %}">{% if item.is_read %}↶{% else %}✓{% endif %}</button>
+      </form>
+    </div>
     <div class="item-meta item-meta-inline">
       <time class="item-time" datetime="{{ item.published_at or '' }}">{{ item.published_at|format_relative_time }}</time>
       <span class="meta-sep" aria-hidden="true">|</span>
       <span class="item-source">{{ item.source_label }}</span>
-      {% if include_read and item.is_read %}
-      <span class="meta-sep" aria-hidden="true">|</span>
-      <span class="item-read-state">Read</span>
+      {% if include_read or request.url.path == '/starred' %}
+      <span class="meta-sep" data-read-state-separator aria-hidden="true"{% if not item.is_read %} hidden{% endif %}>|</span>
+      <span class="item-read-state" data-read-state{% if not item.is_read %} hidden{% endif %}>Read</span>
       {% endif %}
     </div>
     <h2>
-      <a href="{{ item.open_url }}">{{ item.title }}</a>
+      <a href="{{ item.open_url }}" data-open-article>{{ item.title }}</a>
     </h2>
     {% if item.comments_url and item.summary_is_comments %}
-    <p><a href="{{ item.comments_url }}" target="_blank" rel="noreferrer">Comments</a></p>
+    <p><a href="{{ item.comments_url }}" rel="noreferrer">Comments</a></p>
     {% elif item.summary_excerpt %}
     <p>{{ item.summary_excerpt }}</p>
     {% endif %}

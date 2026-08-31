@@ -13,7 +13,8 @@ import httpx
 @dataclass(frozen=True)
 class Sample:
     elapsed_ms: float
-    size_bytes: int
+    decoded_bytes: int
+    transferred_bytes: int
     server_timing: str
 
 
@@ -30,7 +31,8 @@ def _fetch(client: httpx.Client, path: str) -> Sample:
     response.raise_for_status()
     return Sample(
         elapsed_ms=elapsed_ms,
-        size_bytes=len(response.content),
+        decoded_bytes=len(response.content),
+        transferred_bytes=response.num_bytes_downloaded or len(response.content),
         server_timing=response.headers.get("server-timing", ""),
     )
 
@@ -65,7 +67,8 @@ def main() -> None:
         samples = [_fetch(client, args.path) for _ in range(args.requests)]
 
     times = [sample.elapsed_ms for sample in samples]
-    sizes = [sample.size_bytes for sample in samples]
+    decoded_sizes = [sample.decoded_bytes for sample in samples]
+    transferred_sizes = [sample.transferred_bytes for sample in samples]
     print(f"URL: {args.url.rstrip('/')}{args.path}")
     print(f"Requests: {len(samples)} after {args.warmup} warmup")
     print(
@@ -73,7 +76,11 @@ def main() -> None:
         f"min {min(times):.1f} ms, median {statistics.median(times):.1f} ms, "
         f"p95 {_percentile(times, 0.95):.1f} ms, max {max(times):.1f} ms"
     )
-    print(f"Response body: median {statistics.median(sizes):.0f} bytes")
+    print(
+        "Response body: "
+        f"median {statistics.median(transferred_sizes):.0f} bytes transferred, "
+        f"{statistics.median(decoded_sizes):.0f} bytes decoded"
+    )
     if samples[-1].server_timing:
         print(f"Latest Server-Timing: {samples[-1].server_timing}")
 

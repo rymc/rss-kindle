@@ -37,6 +37,46 @@ def test_simplify_html_for_kindle_strips_heavy_markup():
     assert "<strong>world</strong>" in simplified
 
 
+def test_simplify_html_preserves_media_descriptions_without_image_requests():
+    html = """
+    <article>
+      <figure>
+        <img src="https://example.com/chart.png" alt="Quarterly revenue chart" />
+        <figcaption>Revenue rose in every region.</figcaption>
+      </figure>
+      <p>Results follow the chart.</p>
+      <img src="https://example.com/map.png" alt="Map of the affected area" />
+      <picture>
+        <source srcset="https://example.com/device.webp" />
+        <img src="https://example.com/device.png" alt="The new reading device" />
+      </picture>
+    </article>
+    """
+
+    simplified = simplify_html_for_kindle(html)
+
+    assert "<img" not in simplified
+    assert "https://example.com/chart.png" not in simplified
+    assert "Figure: Revenue rose in every region." in simplified
+    assert "Image: Map of the affected area" in simplified
+    assert "Image: The new reading device" in simplified
+
+
+def test_inline_image_description_stays_inside_its_paragraph():
+    simplified = simplify_html_for_kindle(
+        """
+        <article>
+          <p>Before <img src="chart.png" alt="sales chart"> after.</p>
+          <p>Before <picture><img src="map.png" alt="route map"></picture> after.</p>
+        </article>
+        """
+    )
+
+    assert "<p>Before <em>Image: sales chart</em> after.</p>" in simplified
+    assert "<p>Before <em>Image: route map</em> after.</p>" in simplified
+    assert "<p>Before <p>" not in simplified
+
+
 def test_format_relative_time_uses_reader_friendly_labels():
     reference = datetime(2026, 3, 29, 12, 0, tzinfo=UTC)
 

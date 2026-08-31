@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import logging
+import threading
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,9 +18,12 @@ from app.article_html import simplify_html_for_kindle
 from app.config import Settings
 from app.freshrss import FreshRSSEntry
 from app.repository import CachedArticle, Repository
-from app.utils import compact_source_label, strip_html
+from app.utils import compact_source_label, parse_datetime, strip_html, utc_now
 
 logger = logging.getLogger(__name__)
+
+FAILURE_RETRY_SECONDS = 300
+EXTRACTION_LOCK_COUNT = 32
 
 
 ExtractionStatus = Literal["success", "failed"]
@@ -40,6 +44,7 @@ class ArticleExtractor:
         repository: Repository,
         client_factory: Callable[[], Any] | None = None,
         bridge_client_factory: Callable[[], Any] | None = None,
+        failure_retry_seconds: int = FAILURE_RETRY_SECONDS,
     ):
         self.settings = settings
         self.repository = repository
@@ -53,7 +58,11 @@ class ArticleExtractor:
         self._shared_bridge_client = (
             None
             if bridge_client_factory is not None
-            else self._default_client_factory()
+            else self._default_bridge_client_factory()
+        )
+        self.failure_retry_seconds = max(0, failure_retry_seconds)
+        self._extraction_locks = tuple(
+            threading.Lock() for _ in range(EXTRACTION_LOCK_COUNT)
         )
 
     def _default_client_factory(self) -> httpx.Client:
@@ -107,6 +116,14 @@ class ArticleExtractor:
                 logger.warning("Article prewarm failed for %s", entry.id, exc_info=True)
 
     def ensure_extracted(self, entry: FreshRSSEntry) -> ExtractedArticle:
+        lock = self._extraction_locks[
+            int(hashlib.sha256(entry.id.encode()).hexdigest()[:8], 16)
+            % len(self._extraction_locks)
+        ]
+        with lock:
+            return self._ensure_extracted(entry)
+
+    def _ensure_extracted(self, entry: FreshRSSEntry) -> ExtractedArticle:
         cached = self.repository.get_cached_article(entry.id, entry.url)
         source_fingerprint = self._source_fingerprint(entry)
         if (
@@ -118,19 +135,26 @@ class ArticleExtractor:
         feed_content = self._extract_feed_content(entry)
         if feed_content:
             return self._save(entry, feed_content, source_fingerprint)
-        if bridge_content := self._extract_via_source_bridge(entry):
-            return self._save(entry, bridge_content, source_fingerprint)
         if (
             cached
             and cached.extraction_status != "success"
             and cached.source_fingerprint == source_fingerprint
+            and not self._failed_cache_is_due(cached)
         ):
             return self._from_cache(cached)
+        if bridge_content := self._extract_via_source_bridge(entry):
+            return self._save(entry, bridge_content, source_fingerprint)
         return self._save(
             entry,
             self._extract_from_source(entry),
             source_fingerprint,
         )
+
+    def _failed_cache_is_due(self, cached: CachedArticle) -> bool:
+        extracted_at = parse_datetime(cached.extracted_at)
+        if extracted_at is None:
+            return True
+        return (utc_now() - extracted_at).total_seconds() >= self.failure_retry_seconds
 
     def _extract_from_source(self, entry: FreshRSSEntry) -> ExtractedArticle:
         if not entry.url:

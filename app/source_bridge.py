@@ -339,11 +339,26 @@ class SourceBridgeService:
     def extract_article(
         self, article_url: str, *, fallback_title: str | None = None
     ) -> ExtractedSourceArticle:
+        normalized_url = _normalize_url(article_url)
         source = self._match_source_for_article_url(article_url)
         if source is None:
             raise SourceNotConfiguredError(
                 f"No synthetic source matches article URL: {article_url}"
             )
+
+        if normalized_url is not None:
+            cached_item = self.repository.get_synthetic_feed_item(
+                source.source_id, stable_hash(normalized_url)
+            )
+            if cached_item is not None and cached_item.content_html:
+                return ExtractedSourceArticle(
+                    source_id=cached_item.source_id,
+                    article_url=cached_item.article_url,
+                    title=cached_item.title,
+                    content_html=cached_item.content_html,
+                    summary_text=cached_item.summary_text,
+                    published_at=cached_item.published_at,
+                )
 
         with self._open_client(source) as client:
             page_html = self._fetch_text(client, article_url, source)
@@ -377,14 +392,14 @@ class SourceBridgeService:
         if reference_time is None:
             return True
         refresh_seconds = (
-            source.refresh_seconds or self.settings.source_bridge_refresh_seconds
+            source.refresh_seconds
+            if source.refresh_seconds is not None
+            else self.settings.source_bridge_refresh_seconds
         )
         if refresh_seconds <= 0:
             return True
         age_seconds = (utc_now() - reference_time).total_seconds()
-        if age_seconds + max(0.0, lookahead_seconds) >= refresh_seconds:
-            return True
-        return not cached_items and state.last_successful_at is None
+        return age_seconds + max(0.0, lookahead_seconds) >= refresh_seconds
 
     def _match_source_for_article_url(
         self, article_url: str

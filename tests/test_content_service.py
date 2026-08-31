@@ -1,3 +1,5 @@
+import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -135,6 +137,92 @@ def test_failed_extraction_is_cached_and_reused(tmp_path: Path):
     assert "paywalled" in (first.error_message or "").lower()
     assert second.extraction_status == "failed"
     assert repository.get_cached_article(entry.id, entry.url) is not None
+
+
+def test_failed_extraction_retries_after_the_backoff_and_can_recover(
+    tmp_path: Path,
+):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    failed_client = FakeClient(FakeResponse("", status_code=503))
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=lambda: failed_client,
+    )
+    entry = build_entry()
+
+    first = extractor.ensure_extracted(entry)
+    second = extractor.ensure_extracted(entry)
+
+    assert first.extraction_status == "failed"
+    assert second.extraction_status == "failed"
+    assert len(failed_client.calls) == 1
+
+    with sqlite3.connect(repository.database.path) as connection:
+        connection.execute(
+            "UPDATE article_cache SET extracted_at = ? WHERE entry_id = ?",
+            ("2020-01-01T00:00:00+00:00", entry.id),
+        )
+        connection.commit()
+    recovered_html = """
+    <html><body><article>
+      <p>A recovered article paragraph with enough useful detail for the reader.</p>
+      <p>A second paragraph confirms that the retry succeeded.</p>
+    </article></body></html>
+    """
+    recovered_client = FakeClient(FakeResponse(recovered_html))
+    recovered = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=lambda: recovered_client,
+    ).ensure_extracted(entry)
+
+    assert recovered.extraction_status == "success"
+    assert "retry succeeded" in recovered.html
+    assert len(recovered_client.calls) == 1
+
+
+def test_concurrent_article_requests_share_one_extraction(tmp_path: Path):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = build_settings(tmp_path)
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+
+    class BlockingClient(FakeClient):
+        def get(self, url, **kwargs):
+            self.calls.append({"url": url, **kwargs})
+            fetch_started.set()
+            release_fetch.wait(timeout=2)
+            return self.response
+
+    client = BlockingClient(
+        FakeResponse(
+            "<html><body><article><p>A complete shared extraction paragraph with useful detail.</p>"
+            "<p>A second paragraph makes this a meaningful article.</p></article></body></html>"
+        )
+    )
+    extractor = ArticleExtractor(
+        settings,
+        repository,
+        client_factory=lambda: client,
+    )
+    results = []
+
+    first = threading.Thread(target=lambda: results.append(extractor.ensure_extracted(build_entry())))
+    second = threading.Thread(target=lambda: results.append(extractor.ensure_extracted(build_entry())))
+    first.start()
+    assert fetch_started.wait(timeout=1)
+    second.start()
+    release_fetch.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert len(results) == 2
+    assert all(article.extraction_status == "success" for article in results)
+    assert len(client.calls) == 1
 
 
 def test_successful_cache_hit_skips_feed_and_network_extraction(
@@ -430,3 +518,29 @@ def test_source_bridge_token_is_forwarded_when_configured(tmp_path: Path):
     assert article.extraction_status == "success"
     assert bridge_client.calls
     assert bridge_client.calls[0]["headers"] == {"X-Source-Bridge-Token": "bridge-token"}
+
+
+def test_default_source_bridge_client_uses_the_bridge_timeout(
+    tmp_path: Path,
+    monkeypatch,
+):
+    repository = Repository(Database(tmp_path / "content.db"))
+    repository.initialize()
+    settings = replace(build_settings(tmp_path), source_bridge_timeout_seconds=17)
+    created_timeouts = []
+
+    class CapturingHttpClient:
+        def __init__(self, **kwargs):
+            created_timeouts.append(kwargs["timeout"])
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("app.content_service.httpx.Client", CapturingHttpClient)
+    extractor = ArticleExtractor(settings, repository)
+
+    try:
+        assert created_timeouts[0] == settings.http_timeout_seconds
+        assert created_timeouts[1].read == settings.source_bridge_timeout_seconds
+    finally:
+        extractor.close()
