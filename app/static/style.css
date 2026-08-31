@@ -667,6 +667,27 @@ button,
   transform-origin: left center;
 }
 
+.article-page-mask {
+  position: fixed;
+  z-index: 1;
+  right: 2.75rem;
+  left: 2.75rem;
+  background: #fff;
+  pointer-events: auto;
+}
+
+.article-page-mask[hidden] {
+  display: none;
+}
+
+.article-page-mask-top {
+  top: 0;
+}
+
+.article-page-mask-bottom {
+  bottom: 0;
+}
+
 .article-end-cue {
   position: fixed;
   z-index: 5;
