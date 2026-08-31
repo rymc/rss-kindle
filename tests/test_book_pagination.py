@@ -257,9 +257,9 @@ def test_article_pages_show_complete_non_repeated_lines_with_book_rules(
     assert result["maximumTopMask"] <= 10
     assert result["finalPageFirstLine"] <= 12
     assert result["keptFinalPageAfterResize"] is True
-    assert result["typography"]["textAlign"] == "justify"
-    assert result["typography"]["hyphens"] == "auto"
-    assert result["typography"]["lineHeightRatio"] <= 1.5
-    assert result["typography"]["paragraphMargin"] == 0
-    assert result["typography"]["paragraphIndent"] > 0
+    assert result["typography"]["textAlign"] == "left"
+    assert result["typography"]["hyphens"] == "none"
+    assert 1.55 <= result["typography"]["lineHeightRatio"] <= 1.61
+    assert 0 < result["typography"]["paragraphMargin"] <= 16
+    assert result["typography"]["paragraphIndent"] == 0
     assert result["typography"]["sectionHeadingAlign"] == "left"
