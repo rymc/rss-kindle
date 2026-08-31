@@ -1,39 +1,32 @@
 # RSS Kindle
 
-A small, fast FreshRSS frontend built for Kindle browsers.
+RSS Kindle is a fast, simple FreshRSS reader built for Kindle browsers and e-ink screens.
 
-FreshRSS still handles subscriptions, polling, unread state, and stars. RSS Kindle provides a simpler reading screen, extracts cleaner article text, and caches it locally. It is designed for one FreshRSS account rather than as a public, multi-user service.
+## Main features
 
-## Highlights
+- Paged article lists and local page turns
+- Clean article text without images or media
+- FreshRSS feeds, groups, unread state, and starred articles
+- Articles remain unread until you leave their final page
+- Optional login, Kindle pairing, and an operations dashboard
+- An optional source bridge for feeds that need browser access
 
-- Three-card pages and large side controls instead of unreliable Kindle scrolling
-- Full-article extraction with a local SQLite cache
-- FreshRSS groups, feeds, unread state, and stars
-- Articles stay unread until you move past their final page
-- Optional password login and long-lived Kindle pairing codes
-- A small dashboard for health, devices, bridge refreshes, and backups
-- An optional source bridge for sites with missing, incomplete, or protected feeds
+## How it works on Kindle
 
-## Optimized for Kindle
+RSS Kindle limits network requests and browser work. Each article-list response contains 15 articles, shown as five pages of three cards. Only the first page requires a server request. Article page turns are also local. The Kindle contacts the server when it opens another article.
 
-RSS Kindle is designed for the Kindle browser and e-ink display. It avoids long scrolling pages and keeps browser work small.
+RSS Kindle also:
 
-The list loads 15 articles at once and presents them as five pages of three cards. The first page comes from the server. The next four page turns need no network request. Article page turns also remain local until the reader moves to another article.
-
-The interface also:
-
-- compresses HTML, CSS, and JavaScript
-- caches static assets and FreshRSS responses
-- removes images and other media from articles
-- avoids animations, smooth scrolling, and web fonts
-- limits third-party browser requests
-- changes only the cards and controls needed for a page turn
+- compresses HTML, CSS, and JavaScript and caches static files
+- caches FreshRSS responses
+- removes article images and media
+- does not use animations, smooth scrolling, or web fonts
+- avoids third-party browser requests
+- updates only the content needed for each page turn
 
 ### Browser benchmark
 
-This benchmark compares the default FreshRSS 1.29.1 interface with RSS Kindle at `e663e7f`. The FreshRSS figures come from the original controlled Caddy run. The current RSS Kindle figures use the latest deterministic 15-article regression fixture. The matching browser and network profile makes the client payload and rendering comparison useful, but the server topology is different.
-
-Chromium ran at 600 × 800 with 6× CPU slowdown, 150 ms added latency, and a 1 Mbit/s connection. Each result is the median of 10 loads after one warmup load. CPU throttling exposes expensive browser work; it does not simulate a specific Kindle processor.
+This controlled browser test compares FreshRSS 1.29.1 with RSS Kindle. Chromium ran at 600 × 800 with 6× CPU slowdown, 150 ms added latency, and a 1 Mbit/s connection. Each result is the median of 10 loads after one warmup load.
 
 | Metric | FreshRSS | RSS Kindle | Difference |
 | --- | ---: | ---: | ---: |
@@ -42,11 +35,7 @@ Chromium ran at 600 × 800 with 6× CPU slowdown, 150 ms added latency, and a 1 
 | Cold resource requests | 22 | 3 | 86% fewer |
 | Cold first contentful paint | 580 ms | 418 ms | 162 ms lower |
 
-A warm load keeps the browser's cached CSS, JavaScript, and other assets. A cold load clears that browser cache before each measurement.
-
-[First Contentful Paint](https://www.w3.org/TR/paint-timing/) measures when Chromium first renders text or an image. It does not measure the Kindle panel's physical refresh. E-ink refresh time also depends on the display controller, waveform, temperature, and whether the device performs a full or partial update.
-
-These results therefore measure network and browser work, not exact Kindle page-turn time. Transferred data, request count, and network-free page turns apply directly to the Kindle experience. The Chromium paint result is a controlled comparison of the work completed before the e-ink display updates.
+Warm loads use cached files. Cold loads use an empty browser cache. These browser results do not include the physical e-ink refresh.
 
 ## Requirements
 
@@ -54,11 +43,13 @@ These results therefore measure network and browser work, not exact Kindle page-
 - A FreshRSS account with API access enabled
 - The API password for that FreshRSS account
 
-RSS Kindle accepts either a FreshRSS base URL or the full Google Reader API URL. See the FreshRSS documentation for [mobile access](https://freshrss.github.io/FreshRSS/en/users/06_Mobile_access.html) and the [Google Reader API](https://freshrss.github.io/FreshRSS/en/developers/06_GoogleReader_API.html).
+RSS Kindle accepts a FreshRSS base URL or a full Google Reader API URL. See the FreshRSS documentation for [mobile access](https://freshrss.github.io/FreshRSS/en/users/06_Mobile_access.html) and the [Google Reader API](https://freshrss.github.io/FreshRSS/en/developers/06_GoogleReader_API.html).
 
 ## Quick start
 
-This is the usual setup when FreshRSS already runs somewhere else.
+Use these steps when FreshRSS runs on another server.
+
+Copy the environment template:
 
 ```bash
 cp .env.example .env
@@ -72,7 +63,7 @@ FRESHRSS_USERNAME=reader
 FRESHRSS_API_PASSWORD=replace-me
 ```
 
-Then start the reader:
+Start RSS Kindle:
 
 ```bash
 docker compose up --build -d rss-kindle
@@ -80,11 +71,11 @@ docker compose up --build -d rss-kindle
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-The container runs as UID and GID `1000` by default. If that user cannot write to `./data`, set `RSS_KINDLE_UID` and `RSS_KINDLE_GID` to the owner of the directory.
+The container uses UID and GID `1000` by default. If this user cannot write to `./data`, set `RSS_KINDLE_UID` and `RSS_KINDLE_GID` to the directory owner's values.
 
-### Protect the reader
+### Optional login
 
-Add all three values to `.env`:
+Enable the login if users can reach RSS Kindle outside your trusted network. Add these values to `.env`:
 
 ```dotenv
 APP_AUTH_USERNAME=reader
@@ -92,23 +83,29 @@ APP_AUTH_PASSWORD=replace-me
 APP_AUTH_SECRET=replace-with-a-long-random-string
 ```
 
-Keep `APP_SECURE_COOKIES=true` behind HTTPS. Set it to `false` only for plain HTTP on a trusted local network.
+Keep `APP_SECURE_COOKIES=true` when you use HTTPS. Set it to `false` only for plain HTTP on a trusted local network.
+
+## Using the reader
+
+The article list shows three articles at a time. Use the left and right edges to change pages. The header shows the page number and article range. Open **Menu** for categories, starred articles, feeds, the read filter, Dashboard, and Log out.
+
+Opening an article does not mark it as read. The side controls move one screen at a time. Move right from the final screen to mark the article as read and open the next article. Home opens **All articles**. × returns to the article list and the card that you opened.
+
+The footer contains Back to list, Star or Unstar, Mark read or unread, and Open original.
 
 ## Deployment options
 
-### Reader and FreshRSS
+### RSS Kindle with FreshRSS
 
 The [reader-with-freshrss example](examples/reader-with-freshrss) runs both services on one Docker network.
 
-Review the volume paths in the example before you use it on a server.
-
-Start FreshRSS first:
+Set the correct volume paths before you start the services. Start FreshRSS first:
 
 ```bash
 docker compose -f examples/reader-with-freshrss/docker-compose.yml up -d freshrss
 ```
 
-Complete FreshRSS setup at [http://127.0.0.1:8081](http://127.0.0.1:8081), enable API access for the reader account, and then start RSS Kindle:
+Complete the FreshRSS setup at [http://127.0.0.1:8081](http://127.0.0.1:8081). Enable API access for the reader account. Then start RSS Kindle:
 
 ```bash
 FRESHRSS_USERNAME=reader \
@@ -118,7 +115,9 @@ docker compose -f examples/reader-with-freshrss/docker-compose.yml up --build -d
 
 ### Full stack
 
-The [full-stack example](examples/full-stack) adds Caddy and `source-bridge`. Use it only when you need synthetic feeds or authenticated extraction. Change the hostnames in [`examples/full-stack/Caddyfile`](examples/full-stack/Caddyfile) before you start it, and make sure they resolve to the Docker host.
+The [full-stack example](examples/full-stack) adds Caddy and `source-bridge`. Use it when you need synthetic feeds or article extraction with authentication.
+
+Change the hostnames in [`examples/full-stack/Caddyfile`](examples/full-stack/Caddyfile). Make sure that they resolve to the Docker host. Then start the stack:
 
 ```bash
 cp source-bridge.example.toml source-bridge.toml
@@ -130,19 +129,11 @@ FRESHRSS_API_PASSWORD=replace-me \
 docker compose -f examples/full-stack/docker-compose.yml up --build -d
 ```
 
-For a new FreshRSS install, create the `reader` account and give it the same API password after the stack starts. See [Source bridge](docs/source-bridge.md) for configuration, authentication, browser profiles, and synthetic feed URLs.
-
-## Using the reader
-
-The list shows three articles at a time. Use the left and right edges to move between pages. The header shows the current page and article range; its **Menu** contains categories, starred items, feeds, the read filter, Dashboard, and Log out.
-
-Opening an article does not mark it read. The side controls move one screen at a time. Moving right after the final screen marks the article read and opens the next one. Home opens **All articles**; × returns to the list and card you came from.
-
-The footer contains Back to list, Star or Unstar, Mark read or unread, and Open original.
+For a new FreshRSS installation, create the `reader` account after the stack starts. Give it the same API password. See [Source bridge](docs/source-bridge.md) for configuration, authentication, browser profiles, and synthetic feed URLs.
 
 ## Kindle pairing
 
-Password authentication is optional, but it is useful if the reader is reachable outside a trusted network. Password sessions can open the dashboard. Paired Kindle sessions can only use the reader.
+Password sessions can use the reader and dashboard. Paired Kindle sessions can use only the reader.
 
 To pair a Kindle:
 
@@ -151,11 +142,11 @@ To pair a Kindle:
 3. Open `/activate` on the Kindle.
 4. Enter the six-digit code and an optional device name.
 
-The code lasts 10 minutes by default. A paired device remains signed in for one year and can be revoked from the dashboard.
+The code is valid for 10 minutes by default. A paired device remains signed in for one year. You can revoke its access from the dashboard.
 
 ## Configuration
 
-The environment template is [`.env.example`](.env.example). These are the settings most deployments need:
+The environment template is [`.env.example`](.env.example). Most deployments use these settings:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
@@ -174,26 +165,26 @@ The environment template is [`.env.example`](.env.example). These are the settin
 | `SOURCE_BRIDGE_API_URL` | Source bridge URL; used only with a bridge token | `http://source-bridge:8100` in bridge Compose files |
 | `SOURCE_BRIDGE_ACCESS_TOKEN` | Shared bridge token | required when the bridge runs |
 
-## Dashboard and backups
+## Operations and security
 
 The password-only dashboard shows FreshRSS status, cache statistics, paired devices, source bridge status, and retained backups.
 
-Create an application backup from the dashboard or the command line:
+Create an application backup from the dashboard or run:
 
 ```bash
 docker compose exec rss-kindle python -m app.backup_cli
 ```
 
-These ZIP files contain the RSS Kindle database and, when present, the source bridge database. They do not include FreshRSS data, `.env`, cookies, browser profiles, or private configuration. Back up the persistent volumes and private configuration separately. See [Deployment](deploy/README.md) for the recommended split between application archives and host backups.
+Each ZIP file contains the RSS Kindle database and, when present, the source bridge database. It does not contain FreshRSS data, `.env`, cookies, browser profiles, or private configuration. Back up the persistent volumes and private configuration separately. See [Deployment](deploy/README.md) for the recommended backup design.
 
-## Security
+For a secure deployment:
 
-- Enable the built-in login if the reader is not confined to a trusted network.
-- Use HTTPS and leave secure cookies enabled on public deployments.
+- Enable the login outside a trusted network.
+- Use HTTPS and keep secure cookies enabled on public deployments.
 - Keep `.env`, `source-bridge.toml`, cookies, and browser profiles out of git.
-- Set `SOURCE_BRIDGE_ACCESS_TOKEN` whenever `source-bridge` runs.
-- Restrict `APP_ALLOWED_HOSTS` to the hostnames you use.
-- The supplied Compose files run the app without root, remove Linux capabilities, and use a read-only root filesystem.
+- Set `SOURCE_BRIDGE_ACCESS_TOKEN` when `source-bridge` runs.
+- Set `APP_ALLOWED_HOSTS` to the hostnames that you use.
+- Use the supplied Compose files to run the app without root, remove Linux capabilities, and use a read-only root filesystem.
 
 ## Development
 
@@ -211,7 +202,7 @@ Run the tests:
 uv run pytest -q
 ```
 
-Run a repeatable server benchmark against a reader instance:
+Run a repeatable server benchmark against an RSS Kindle instance:
 
 ```bash
 uv run rss-kindle-benchmark https://reader.example.com --path / --requests 20
@@ -223,7 +214,7 @@ Run the throttled browser benchmark:
 uv run rss-kindle-browser-benchmark https://reader.example.com --path / --requests 10 --cold
 ```
 
-The browser benchmark reports load, transfer, DOM, layout shift, long tasks, and page-turn layout, style, mutation, and main-thread work. It helps catch regressions but does not reproduce e-ink refresh time. Check interaction and page turns on a physical Kindle before a release.
+The browser benchmark reports load time, transfer size, DOM size, layout shift, long tasks, and page-turn work. It helps find regressions but does not reproduce e-ink refresh time. Test interaction and page turns on a physical Kindle before a release.
 
 ## License
 
