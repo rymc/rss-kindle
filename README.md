@@ -36,18 +36,18 @@ The interface also:
 
 ### Browser benchmark
 
-This benchmark compares the default FreshRSS 1.29.1 interface with RSS Kindle at `27f306f`. Both used the same FreshRSS account, default settings, and 15 unread articles. Both ran behind the same Caddy proxy with gzip enabled.
+This benchmark compares the default FreshRSS 1.29.1 interface with RSS Kindle at `e663e7f`. The FreshRSS figures come from the original controlled Caddy run. The current RSS Kindle figures use the latest deterministic 15-article regression fixture. The matching browser and network profile makes the client payload and rendering comparison useful, but the server topology is different.
 
 Chromium ran at 600 × 800 with 6× CPU slowdown, 150 ms added latency, and a 1 Mbit/s connection. Each result is the median of 10 loads after one warmup load. CPU throttling exposes expensive browser work; it does not simulate a specific Kindle processor.
 
 | Metric | FreshRSS | RSS Kindle | Difference |
 | --- | ---: | ---: | ---: |
-| Cold transferred data | 117.3 KB | 9.1 KB | 92% less |
-| Warm transferred data | 6.6 KB | 2.3 KB | 65% less |
+| Cold transferred data | 117.3 KB | 10.8 KB | 91% less |
+| Warm transferred data | 6.6 KB | 0.3 KB | 95% less |
 | Cold resource requests | 22 | 3 | 86% fewer |
-| Cold first contentful paint | 580 ms | 410 ms | 170 ms lower |
+| Cold first contentful paint | 580 ms | 418 ms | 162 ms lower |
 
-A warm load keeps the browser's cached CSS, JavaScript, and other assets. A cold load clears that browser cache before each measurement. Both services remain running and signed in.
+A warm load keeps the browser's cached CSS, JavaScript, and other assets. A cold load clears that browser cache before each measurement.
 
 [First Contentful Paint](https://www.w3.org/TR/paint-timing/) measures when Chromium first renders text or an image. It does not measure the Kindle panel's physical refresh. E-ink refresh time also depends on the display controller, waveform, temperature, and whether the device performs a full or partial update.
 
