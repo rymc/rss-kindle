@@ -67,8 +67,6 @@ class HackerNewsComment:
     depth: int
     visual_depth: int
     parent_author: str | None
-    reply_count: int
-    permalink: str
     is_deleted: bool
     is_dead: bool
 
@@ -333,10 +331,6 @@ def _flatten_comments(
                     depth=depth,
                     visual_depth=min(depth, 4),
                     parent_author=parent_author,
-                    reply_count=len(child_ids),
-                    permalink=(
-                        f"{HACKER_NEWS_WEB_BASE_URL}/item?id={comment_id}"
-                    ),
                     is_deleted=deleted,
                     is_dead=dead,
                 )

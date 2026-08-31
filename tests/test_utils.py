@@ -4,6 +4,7 @@ from app.article_html import cleanup_kindle_article_html, simplify_html_for_kind
 from app.utils import (
     compact_source_label,
     extract_hacker_news_comments_url,
+    format_compact_relative_time,
     format_relative_time,
     hacker_news_destination_host,
     hacker_news_item_id,
@@ -85,6 +86,23 @@ def test_format_relative_time_uses_reader_friendly_labels():
     assert format_relative_time("2026-03-29T11:59:00+00:00", reference) == "1 min ago"
     assert format_relative_time("2026-03-29T10:00:00+00:00", reference) == "2 hours ago"
     assert format_relative_time("2026-03-27T12:00:00+00:00", reference) == "2 days ago"
+
+
+def test_format_compact_relative_time_uses_short_labels():
+    reference = datetime(2026, 3, 29, 12, 0, tzinfo=UTC)
+
+    assert format_compact_relative_time(
+        "2026-03-29T11:59:00+00:00", reference
+    ) == "1m"
+    assert format_compact_relative_time(
+        "2026-03-29T10:00:00+00:00", reference
+    ) == "2h"
+    assert format_compact_relative_time(
+        "2026-03-27T12:00:00+00:00", reference
+    ) == "2d"
+    assert format_compact_relative_time(
+        "2026-03-29T12:02:00+00:00", reference
+    ) == "in 2m"
 
 
 def test_compact_source_label_trims_verbose_feed_titles():

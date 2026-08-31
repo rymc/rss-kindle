@@ -35,7 +35,11 @@ from app.freshrss import (
 from app.hacker_news import HackerNewsDiscussion
 from app.mutations import MutationService
 from app.repository import Repository
-from app.utils import format_datetime, format_relative_time
+from app.utils import (
+    format_compact_relative_time,
+    format_datetime,
+    format_relative_time,
+)
 
 
 class FreshRSSService(Protocol):
@@ -93,6 +97,9 @@ def build_templates(settings: Settings) -> Jinja2Templates:
     templates = Jinja2Templates(directory=str(settings.base_dir / "app" / "templates"))
     templates.env.filters["format_datetime"] = format_datetime
     templates.env.filters["format_relative_time"] = format_relative_time
+    templates.env.filters["format_compact_relative_time"] = (
+        format_compact_relative_time
+    )
     templates.env.globals["static_versions"] = _static_asset_versions(
         settings.base_dir / "app" / "static"
     )

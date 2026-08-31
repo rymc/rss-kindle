@@ -57,6 +57,32 @@ def format_relative_time(value: str | None, reference: datetime | None = None) -
     return f"in {count} {label_text}" if future else f"{count} {label_text} ago"
 
 
+def format_compact_relative_time(
+    value: str | None,
+    reference: datetime | None = None,
+) -> str:
+    parsed = parse_datetime(value)
+    if not parsed:
+        return "?"
+
+    reference = reference.astimezone(UTC) if reference else utc_now()
+    delta_seconds = int((reference - parsed).total_seconds())
+    if abs(delta_seconds) < 60:
+        return "now"
+
+    count, label = _relative_time_unit(abs(delta_seconds))
+    suffix = {
+        "min": "m",
+        "hour": "h",
+        "day": "d",
+        "week": "w",
+        "month": "mo",
+        "year": "y",
+    }[label]
+    compact = f"{count}{suffix}"
+    return f"in {compact}" if delta_seconds < 0 else compact
+
+
 def _relative_time_unit(seconds: int) -> tuple[int, str]:
     units = (
         (60 * 60, 60, "min"),
