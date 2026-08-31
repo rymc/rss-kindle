@@ -84,6 +84,7 @@ def _simplify_html_for_kindle_cached(
     source_url: str | None,
 ) -> str:
     soup = BeautifulSoup(value, "lxml")
+    _replace_media_with_text(soup)
     for tag in soup.find_all(REMOVE_TAGS):
         tag.decompose()
     for tag in list(soup.find_all(True)):
@@ -98,6 +99,77 @@ def _simplify_html_for_kindle_cached(
             source_url=source_url,
         )
     return str(soup).strip()
+
+
+def _replace_media_with_text(soup: BeautifulSoup) -> None:
+    for figure in list(soup.find_all("figure")):
+        caption = figure.find("figcaption")
+        description = caption.get_text(" ", strip=True) if caption else ""
+        if not description:
+            image = figure.find("img")
+            description = _useful_alt_text(image.get("alt") if image else None)
+        replacement = _description_paragraph(soup, "Figure", description)
+        if replacement is None:
+            figure.decompose()
+        else:
+            figure.replace_with(replacement)
+
+    for picture in list(soup.find_all("picture")):
+        image = picture.find("img")
+        replacement = _description_emphasis(
+            soup,
+            "Image",
+            _useful_alt_text(image.get("alt") if image else None),
+        )
+        if replacement is None:
+            picture.decompose()
+        else:
+            picture.replace_with(replacement)
+
+    for image in list(soup.find_all("img")):
+        replacement = _description_emphasis(
+            soup,
+            "Image",
+            _useful_alt_text(image.get("alt")),
+        )
+        if replacement is None:
+            image.decompose()
+        else:
+            image.replace_with(replacement)
+
+
+def _description_paragraph(
+    soup: BeautifulSoup, label: str, description: str
+) -> Tag | None:
+    if not description:
+        return None
+    paragraph = soup.new_tag("p")
+    emphasis = soup.new_tag("em")
+    emphasis.string = f"{label}: {description}"
+    paragraph.append(emphasis)
+    return paragraph
+
+
+def _description_emphasis(
+    soup: BeautifulSoup, label: str, description: str
+) -> Tag | None:
+    if not description:
+        return None
+    emphasis = soup.new_tag("em")
+    emphasis.string = f"{label}: {description}"
+    return emphasis
+
+
+def _useful_alt_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    description = re.sub(r"\s+", " ", value).strip()
+    normalized = description.lower().strip(". ")
+    if normalized in {"", "image", "photo", "picture", "figure", "thumbnail"}:
+        return ""
+    if re.fullmatch(r"[^/\\]+\.(?:avif|gif|jpe?g|png|webp)", normalized):
+        return ""
+    return description[:500]
 
 
 def cleanup_kindle_article_html(

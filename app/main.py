@@ -19,6 +19,7 @@ from app.dashboard_routes import DashboardController
 from app.db import Database
 from app.device_auth import DeviceAuthService
 from app.freshrss import FreshRSSClient
+from app.mutations import DurableMutationQueue, ImmediateMutationService
 from app.reader_routes import ReaderController
 from app.repository import Repository
 from app.web_runtime import (
@@ -44,6 +45,11 @@ def create_app(
     repository.initialize()
     freshrss = freshrss_client or FreshRSSClient(settings)
     article_service = extractor or ArticleExtractor(settings, repository)
+    mutations = (
+        DurableMutationQueue(repository, freshrss)
+        if isinstance(freshrss, FreshRSSClient)
+        else ImmediateMutationService(freshrss)
+    )
     backup = BackupService(settings)
     admin = AdminService(settings, repository, freshrss, backup)
     login_required = auth_enabled(
@@ -56,6 +62,7 @@ def create_app(
         settings=settings,
         repository=repository,
         freshrss=freshrss,
+        mutations=mutations,
         extractor=article_service,
         backup=backup,
         admin=admin,

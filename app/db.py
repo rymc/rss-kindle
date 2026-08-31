@@ -7,6 +7,9 @@ from pathlib import Path
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA busy_timeout = 5000;
 
 CREATE TABLE IF NOT EXISTS article_cache (
     entry_id TEXT NOT NULL,
@@ -75,6 +78,18 @@ CREATE TABLE IF NOT EXISTS reading_contexts (
 
 CREATE INDEX IF NOT EXISTS idx_reading_contexts_saved_at
 ON reading_contexts(saved_at DESC);
+
+CREATE TABLE IF NOT EXISTS pending_mutations (
+    entry_id TEXT NOT NULL,
+    state_kind TEXT NOT NULL CHECK (state_kind IN ('read', 'starred')),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    version INTEGER NOT NULL,
+    queued_at TEXT NOT NULL,
+    PRIMARY KEY (entry_id, state_kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_mutations_queued_at
+ON pending_mutations(queued_at ASC);
 """
 
 CURRENT_TABLES = {
@@ -84,6 +99,7 @@ CURRENT_TABLES = {
     "reader_pairing",
     "reader_devices",
     "reading_contexts",
+    "pending_mutations",
 }
 
 
@@ -93,9 +109,11 @@ class Database:
 
     def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA busy_timeout = 5000")
         return connection
 
     def initialize(self) -> None:

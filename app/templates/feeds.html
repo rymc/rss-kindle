@@ -3,6 +3,7 @@
 {% block content %}
 <section class="page-header">
   <h2>Feeds</h2>
+  {% if feed_page_count > 1 %}<p class="item-meta">Page {{ feed_page }} of {{ feed_page_count }}</p>{% endif %}
 </section>
 
 {% if feeds %}
@@ -25,6 +26,12 @@
   </li>
   {% endfor %}
 </ul>
+{% if newer_url or older_url %}
+<nav class="pager" aria-label="Feed pages">
+  {% if newer_url %}<a class="button-link" href="{{ newer_url }}">Previous feeds</a>{% endif %}
+  {% if older_url %}<a class="button-link" href="{{ older_url }}">More feeds</a>{% endif %}
+</nav>
+{% endif %}
 {% else %}
 <p class="empty-state">No feeds available from FreshRSS.</p>
 {% endif %}

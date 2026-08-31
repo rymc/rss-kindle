@@ -31,7 +31,7 @@
       <button type="submit">Mark {% if entry.is_read %}unread{% else %}read{% endif %}</button>
     </form>
     {% if entry.url %}
-    <a class="button-link" href="{{ entry.url }}" target="_blank" rel="noreferrer">Open original</a>
+    <a class="button-link" href="{{ entry.url }}" rel="noreferrer">Open original</a>
     {% endif %}
   </div>
 </article>

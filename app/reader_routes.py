@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
 import time
-from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import httpx
@@ -18,6 +18,7 @@ from fastapi.responses import RedirectResponse, Response
 
 from app.article_html import simplify_html_for_kindle
 from app.freshrss import FreshRSSEntry, FreshRSSError
+from app.mutations import MutationKind
 from app.reader_navigation import (
     ReadingContext,
     StreamRequest,
@@ -37,9 +38,12 @@ from app.web_runtime import (
     action_response,
     build_template_context,
     current_relative_url,
+    reader_template_response,
     record_timing,
     require_csrf,
 )
+
+FEEDS_PER_PAGE = 12
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,7 @@ class ArticleNavigation:
     previous_url: str | None
     next_url: str | None
     next_title: str | None
+    next_entry: FreshRSSEntry | None
 
 
 class ReaderController:
@@ -120,6 +125,12 @@ class ReaderController:
             include_in_schema=False,
         )
         self.router.add_api_route(
+            "/items/{entry_id:path}/state",
+            self.change_item_state,
+            methods=["POST"],
+            name="change_item_state",
+        )
+        self.router.add_api_route(
             "/items/{entry_id:path}/read",
             self.mark_item_read,
             methods=["POST"],
@@ -168,9 +179,11 @@ class ReaderController:
             self.services,
             request,
             page_title="Categories",
+            include_navigation=True,
         )
-        return self.services.templates.TemplateResponse(
-            request=request,
+        return reader_template_response(
+            self.services,
+            request,
             name="categories.html",
             context=context,
         )
@@ -179,6 +192,7 @@ class ReaderController:
         self,
         request: Request,
         feed: str | None = Query(default=None),
+        page: int = Query(default=1, ge=1),
     ) -> Response:
         if feed:
             return RedirectResponse(
@@ -190,8 +204,25 @@ class ReaderController:
             page_title="Feeds",
             include_feeds=True,
         )
-        return self.services.templates.TemplateResponse(
-            request=request,
+        feeds = context["feeds"]
+        page_count = max(1, (len(feeds) + FEEDS_PER_PAGE - 1) // FEEDS_PER_PAGE)
+        page = min(page, page_count)
+        page_start = (page - 1) * FEEDS_PER_PAGE
+        feeds_path = str(self.app.url_path_for("feeds_index"))
+        context.update(
+            {
+                "feeds": feeds[page_start : page_start + FEEDS_PER_PAGE],
+                "feed_page": page,
+                "feed_page_count": page_count,
+                "newer_url": f"{feeds_path}?page={page - 1}" if page > 1 else None,
+                "older_url": (
+                    f"{feeds_path}?page={page + 1}" if page < page_count else None
+                ),
+            }
+        )
+        return reader_template_response(
+            self.services,
+            request,
             name="feeds.html",
             context=context,
         )
@@ -258,8 +289,37 @@ class ReaderController:
             entry_id,
             next_path,
             csrf_token,
-            operation=self.services.freshrss.mark_read,
+            state_kind="read",
+            enabled=True,
             failure_message="Could not mark item as read",
+        )
+
+    def change_item_state(
+        self,
+        request: Request,
+        entry_id: str,
+        state_action: str = Form(...),
+        next_path: str = Form("/"),
+        csrf_token: str | None = Form(default=None),
+    ) -> Response:
+        operations: dict[str, tuple[MutationKind, bool, str]] = {
+            "read": ("read", True, "Could not mark item as read"),
+            "unread": ("read", False, "Could not mark item as unread"),
+            "star": ("starred", True, "Could not star item"),
+            "unstar": ("starred", False, "Could not unstar item"),
+        }
+        operation = operations.get(state_action)
+        if operation is None:
+            raise HTTPException(status_code=400, detail="Unknown item state action")
+        state_kind, enabled, failure_message = operation
+        return self._item_action(
+            request,
+            entry_id,
+            next_path,
+            csrf_token,
+            state_kind=state_kind,
+            enabled=enabled,
+            failure_message=failure_message,
         )
 
     def mark_item_unread(
@@ -274,7 +334,8 @@ class ReaderController:
             entry_id,
             next_path,
             csrf_token,
-            operation=self.services.freshrss.mark_unread,
+            state_kind="read",
+            enabled=False,
             failure_message="Could not mark item as unread",
         )
 
@@ -290,7 +351,8 @@ class ReaderController:
             entry_id,
             next_path,
             csrf_token,
-            operation=self.services.freshrss.mark_starred,
+            state_kind="starred",
+            enabled=True,
             failure_message="Could not star item",
         )
 
@@ -306,7 +368,8 @@ class ReaderController:
             entry_id,
             next_path,
             csrf_token,
-            operation=self.services.freshrss.mark_unstarred,
+            state_kind="starred",
+            enabled=False,
             failure_message="Could not unstar item",
         )
 
@@ -320,6 +383,14 @@ class ReaderController:
         active_feed_id: str | None = None,
     ) -> Response:
         stream_request = StreamRequest.from_request(request, scope)
+        if stream_request.has_legacy_cursor:
+            return RedirectResponse(
+                StreamRequest(
+                    scope=scope,
+                    include_read=stream_request.include_read,
+                ).url(self.app),
+                status_code=303,
+            )
         started_at = time.perf_counter()
         try:
             page = self.services.freshrss.get_stream(
@@ -366,7 +437,10 @@ class ReaderController:
                 "items": items,
                 "older_url": links.older,
                 "newer_url": links.newer,
-                "stream_offset": stream_request.offset,
+                "stream_offset": (
+                    len(stream_request.history)
+                    * self.services.settings.max_stream_items
+                ),
                 "include_read": stream_request.include_read,
                 "read_toggle_url": (
                     stream_request.read_toggle_url(self.app)
@@ -392,14 +466,16 @@ class ReaderController:
         if (
             self.services.settings.article_prewarm_count > 0
             and page.entries
+            and not page.entries_are_compact
             and callable(prewarm)
         ):
             background_tasks.add_task(
                 prewarm,
                 page.entries[: self.services.settings.article_prewarm_count],
             )
-        return self.services.templates.TemplateResponse(
-            request=request,
+        return reader_template_response(
+            self.services,
+            request,
             name="index.html",
             context=context,
             background=background_tasks,
@@ -467,10 +543,22 @@ class ReaderController:
                 "next_title": navigation.next_title,
             }
         )
-        return self.services.templates.TemplateResponse(
-            request=request,
+        background_tasks = BackgroundTasks()
+        prewarm = getattr(self.services.extractor, "prewarm", None)
+        if self.services.settings.article_prewarm_count > 0:
+            if navigation.next_entry is not None and callable(prewarm):
+                background_tasks.add_task(prewarm, [navigation.next_entry])
+            if self._should_prime_next_page(reading_context, entry_id):
+                background_tasks.add_task(
+                    self._first_article,
+                    reading_context.next_page_url,
+                )
+        return reader_template_response(
+            self.services,
+            request,
             name="item.html",
             context=context,
+            background=background_tasks,
         )
 
     def _reading_context(
@@ -483,6 +571,19 @@ class ReaderController:
         )
         return context if context and entry_id in context.entry_ids else None
 
+    @staticmethod
+    def _should_prime_next_page(
+        context: ReadingContext | None,
+        entry_id: str,
+    ) -> bool:
+        if (
+            context is None
+            or not context.next_page_url
+            or len(context.entry_ids) < 2
+        ):
+            return False
+        return context.entry_ids.index(entry_id) == len(context.entry_ids) - 2
+
     def _article_navigation(
         self,
         context: ReadingContext | None,
@@ -490,26 +591,41 @@ class ReaderController:
         context_id: str | None,
     ) -> ArticleNavigation:
         if context is None:
-            return ArticleNavigation(None, None, None)
+            return ArticleNavigation(None, None, None, None)
         index = context.entry_ids.index(entry_id)
         previous_url = (
             item_detail_url(self.app, context.entry_ids[index - 1], context_id)
             if index > 0
-            else None
+            else context.previous_url
         )
+        next_entry = None
         if index + 1 < len(context.entry_ids):
             next_entry_id = context.entry_ids[index + 1]
             next_url = item_detail_url(self.app, next_entry_id, context_id)
-            next_title = self._entry_title(next_entry_id)
+            next_entry = self._entry(next_entry_id)
+            next_title = next_entry.title if next_entry else None
         else:
-            next_url, next_title = self._first_article(context.next_page_url)
-        return ArticleNavigation(previous_url, next_url, next_title)
+            next_url, next_title, next_entry = self._first_article(
+                context.next_page_url,
+                previous_url=item_detail_url(self.app, entry_id, context_id),
+            )
+        return ArticleNavigation(previous_url, next_url, next_title, next_entry)
 
-    def _first_article(self, relative_url: str | None) -> tuple[str | None, str | None]:
+    def _first_article(
+        self,
+        relative_url: str | None,
+        *,
+        previous_url: str | None = None,
+    ) -> tuple[str | None, str | None, FreshRSSEntry | None]:
         if not relative_url:
-            return None, None
+            return None, None, None
         try:
             stream_request = StreamRequest.from_url(relative_url)
+            if stream_request.has_legacy_cursor:
+                stream_request = StreamRequest(
+                    scope=stream_request.scope,
+                    include_read=stream_request.include_read,
+                )
             page = self.services.freshrss.get_stream(
                 scope_kind=stream_request.scope.kind,
                 scope_value=stream_request.scope.value,
@@ -522,30 +638,35 @@ class ReaderController:
             FreshRSSError,
             httpx.HTTPError,
         ):  # pragma: no cover - runtime fallback
-            return None, None
+            return None, None, None
         if not page.entries:
-            return None, None
+            return None, None, None
         links = stream_request.page_links(self.app, page.continuation)
         reading_context = ReadingContext(
             entry_ids=tuple(entry.id for entry in page.entries),
             back_url=relative_url,
             next_page_url=links.older,
+            previous_url=previous_url,
         )
         context_id = self.services.repository.save_reading_context(
             reading_context.encode()
         )
         first_entry = page.entries[0]
+        prewarm_entry = first_entry
+        if page.entries_are_compact:
+            prewarm_entry = self._entry(first_entry.id)
+            first_entry = prewarm_entry or first_entry
         return (
             item_detail_url(self.app, first_entry.id, context_id),
             first_entry.title,
+            prewarm_entry,
         )
 
-    def _entry_title(self, entry_id: str) -> str | None:
+    def _entry(self, entry_id: str) -> FreshRSSEntry | None:
         try:
-            entry = self.services.freshrss.get_entry(entry_id)
+            return self.services.freshrss.get_entry(entry_id)
         except (FreshRSSError, httpx.HTTPError):
             return None
-        return entry.title if entry else None
 
     def _stream_item(
         self,
@@ -580,16 +701,22 @@ class ReaderController:
         next_path: str,
         csrf_token: str | None,
         *,
-        operation: Callable[[Iterable[str]], None],
+        state_kind: MutationKind,
+        enabled: bool,
         failure_message: str,
         default: str = "/",
     ) -> Response:
         require_csrf(request, csrf_token)
         try:
-            operation([entry_id])
+            self.services.mutations.submit(
+                entry_id,
+                state_kind=state_kind,
+                enabled=enabled,
+            )
         except (
             FreshRSSError,
             httpx.HTTPError,
+            sqlite3.Error,
         ) as exc:  # pragma: no cover - runtime path
             raise HTTPException(
                 status_code=503, detail=f"{failure_message}: {exc}"

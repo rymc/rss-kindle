@@ -40,6 +40,7 @@ class FakeFreshRSSClient:
         self.star_calls: list[list[str]] = []
         self.unstar_calls: list[list[str]] = []
         self.navigation_calls = 0
+        self.stream_calls: list[tuple[str, str | None, str | None]] = []
 
     def list_navigation(self):
         self.navigation_calls += 1
@@ -54,6 +55,7 @@ class FakeFreshRSSClient:
         limit: int = 15,
         include_read: bool = False,
     ):
+        self.stream_calls.append((scope_kind, scope_value, continuation))
         page = self.stream_pages[(scope_kind, scope_value, continuation)]
         if scope_kind == "starred":
             entries = [
@@ -515,6 +517,144 @@ def test_next_crosses_page_boundary_when_continuation_exists(tmp_path: Path):
     assert "?" not in next_url
     assert soup.select_one(".article-previous, .article-next") is None
 
+    next_detail = BeautifulSoup(client.get(str(next_url)).text, "html.parser")
+    next_controls = next_detail.select_one(
+        '.page-turn-rails[data-page-mode="article"]'
+    )
+    assert next_controls is not None
+    assert next_controls.get("data-page-previous-url") == detail_url
+
+
+def test_article_response_prewarms_the_next_article(
+    tmp_path: Path,
+    monkeypatch,
+):
+    prewarm_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        FakeExtractor,
+        "prewarm",
+        lambda self, entries: prewarm_calls.append(
+            [entry.id for entry in entries]
+        ),
+        raising=False,
+    )
+    client, freshrss, _ = build_app(tmp_path)
+    stream = client.get("/")
+    prewarm_calls.clear()
+    freshrss.stream_calls.clear()
+
+    client.get(extract_text_link(stream.text, "Second story"))
+
+    assert prewarm_calls == [[freshrss_item_id("1")]]
+    assert freshrss.stream_calls == [("home", None, "page-2")]
+
+
+def test_page_boundary_prewarm_hydrates_a_compact_stream_entry(
+    tmp_path: Path,
+    monkeypatch,
+):
+    prewarm_calls: list[list[tuple[str, str | None]]] = []
+    monkeypatch.setattr(
+        FakeExtractor,
+        "prewarm",
+        lambda self, entries: prewarm_calls.append(
+            [(entry.id, entry.content_html) for entry in entries]
+        ),
+        raising=False,
+    )
+    client, freshrss, _ = build_app(tmp_path)
+    original_get_stream = freshrss.get_stream
+    page_two_calls = 0
+
+    def get_stream(**kwargs):
+        nonlocal page_two_calls
+        page = original_get_stream(**kwargs)
+        if kwargs.get("continuation") != "page-2":
+            return page
+        page_two_calls += 1
+        if page_two_calls == 1:
+            return page
+        return replace(
+            page,
+            entries=[
+                replace(entry, content_html="<p>Truncated preview.</p>")
+                for entry in page.entries
+            ],
+            entries_are_compact=True,
+        )
+
+    monkeypatch.setattr(freshrss, "get_stream", get_stream)
+    stream = client.get("/")
+    second_story_url = extract_text_link(stream.text, "Second story")
+    first_story_url = extract_text_link(stream.text, "First story")
+
+    client.get(second_story_url)
+    prewarm_calls.clear()
+    client.get(first_story_url)
+
+    assert page_two_calls == 2
+    assert prewarm_calls == [
+        [
+            (
+                freshrss_item_id("4"),
+                "<p>Summary for Fourth story</p>",
+            )
+        ]
+    ]
+
+
+def test_compact_cached_stream_does_not_replace_complete_article(tmp_path: Path):
+    settings = build_settings(tmp_path, article_prewarm_count=1)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    feed_token = encode_feed_token("feed/8")
+    complete_marker = "The complete article keeps this final sentence."
+
+    class CacheSensitiveExtractor(FakeExtractor):
+        def __init__(self):
+            self.article_html = (
+                "<article><p>A complete article has enough useful text for the reader.</p>"
+                f"<p>{complete_marker}</p></article>"
+            )
+
+        def prewarm(self, entries):
+            self.article_html = entries[0].content_html or ""
+
+        def ensure_extracted(self, entry: FreshRSSEntry):
+            result = super().ensure_extracted(entry)
+            return replace(result, html=self.article_html)
+
+    entry = make_entry(
+        freshrss_item_id("1"),
+        "Cached story",
+        minute=1,
+        feed_token=feed_token,
+        content_html="<p>Compact stream preview.</p>",
+    )
+    freshrss = FakeFreshRSSClient(
+        FreshRSSNavigation(groups=[], feeds=[]),
+        {
+            ("home", None, None): FreshRSSStreamPage(
+                entries=[entry],
+                continuation=None,
+                entries_are_compact=True,
+            )
+        },
+    )
+    app = create_app(
+        settings,
+        repository=repository,
+        freshrss_client=freshrss,
+        extractor=CacheSensitiveExtractor(),
+    )
+    client = TestClient(app)
+
+    stream = client.get("/")
+    article = client.get(extract_text_link(stream.text, "Cached story"))
+
+    assert article.status_code == 200
+    assert complete_marker in article.text
+
 
 def test_group_and_feed_filters_use_freshrss_navigation(tmp_path: Path):
     client, _, feed_token = build_app(tmp_path)
@@ -558,6 +698,35 @@ def test_group_and_feed_filters_use_freshrss_navigation(tmp_path: Path):
     feeds_page = client.get("/feeds")
     feeds_soup = BeautifulSoup(feeds_page.text, "html.parser")
     assert feeds_soup.find("script", src=re.compile(r"/static/reader\.js")) is None
+
+
+def test_feed_picker_bounds_each_kindle_page(tmp_path: Path):
+    client, freshrss, _ = build_app(tmp_path)
+    freshrss.navigation = FreshRSSNavigation(
+        groups=freshrss.navigation.groups,
+        feeds=[
+            FreshRSSFeed(
+                token=f"feed-{index}",
+                stream_id=f"feed/{index}",
+                title=f"Feed {index:02d}",
+                feed_url=f"https://example.com/{index}.xml",
+                site_url=f"https://example.com/{index}",
+                group_slugs=(),
+            )
+            for index in range(25)
+        ],
+    )
+
+    first = BeautifulSoup(client.get("/feeds").text, "html.parser")
+    second = BeautifulSoup(client.get("/feeds?page=2").text, "html.parser")
+    last = BeautifulSoup(client.get("/feeds?page=3").text, "html.parser")
+
+    assert len(first.select(".feed-card")) == 12
+    assert first.select_one('a[href="/feeds?page=2"]') is not None
+    assert len(second.select(".feed-card")) == 12
+    assert second.select_one('a[href="/feeds?page=1"]') is not None
+    assert len(last.select(".feed-card")) == 1
+    assert "Feed 24" in last.get_text(" ", strip=True)
 
 
 def test_removed_routes_are_gone(tmp_path: Path):
@@ -606,10 +775,10 @@ def test_starred_view_includes_saved_read_items(tmp_path: Path):
     assert "Second story" not in response.text
 
 
-def test_reader_responses_include_performance_headers_and_lightweight_navigation(
+def test_home_skips_unused_navigation_and_keeps_the_category_link(
     tmp_path: Path,
 ):
-    client, _, _ = build_app(tmp_path)
+    client, freshrss, _ = build_app(tmp_path)
 
     response = client.get("/")
 
@@ -617,6 +786,8 @@ def test_reader_responses_include_performance_headers_and_lightweight_navigation
     assert "freshrss_stream;dur=" in response.headers["server-timing"]
     assert "total;dur=" in response.headers["server-timing"]
     assert response.headers["x-rss-kindle-version"]
+    assert response.headers["cache-control"] == "private, no-cache"
+    assert freshrss.navigation_calls == 0
     assert "Browse feeds" not in response.text
     soup = BeautifulSoup(response.text, "html.parser")
     category_link = soup.select_one("a.category-picker-link")
@@ -624,6 +795,21 @@ def test_reader_responses_include_performance_headers_and_lightweight_navigation
     assert category_link.get_text(strip=True) == "Categories"
     assert str(category_link.get("href")).endswith("/categories")
     assert soup.select_one("select") is None
+
+
+def test_reader_page_revalidation_returns_no_html_body(tmp_path: Path):
+    client, _, _ = build_app(tmp_path)
+
+    first = client.get("/")
+    etag = first.headers.get("etag")
+    assert etag and etag.startswith('W/"')
+
+    revalidated = client.get("/", headers={"If-None-Match": etag})
+
+    assert revalidated.status_code == 304
+    assert revalidated.content == b""
+    assert revalidated.headers["etag"] == etag
+    assert revalidated.headers["cache-control"] == "private, no-cache"
 
 
 def test_reader_quick_action_skips_redirect_and_forms_keep_a_normal_fallback(
@@ -643,13 +829,21 @@ def test_reader_quick_action_skips_redirect_and_forms_keep_a_normal_fallback(
     assert read_button is not None
     assert read_button.get_text(strip=True) == "✓"
     assert read_button.get("title") == "Mark as read"
-    star_url = star_button.get("formaction")
+    star_form = star_button.find_parent("form")
+    read_form = read_button.find_parent("form")
+    assert star_form is not None
+    assert read_form is not None
+    assert star_form is read_form
+    assert not star_button.has_attr("formaction")
+    assert not read_button.has_attr("formaction")
+    star_url = star_form.get("action")
     assert star_url
     payload = {
         input_node.get("name"): input_node.get("value", "")
-        for input_node in forms[0].find_all("input")
+        for input_node in star_form.find_all("input")
         if input_node.get("name")
     }
+    payload["state_action"] = str(star_button.get("value"))
 
     quick_response = client.post(
         str(star_url),
@@ -661,7 +855,22 @@ def test_reader_quick_action_skips_redirect_and_forms_keep_a_normal_fallback(
     assert quick_response.status_code == 204
     assert "location" not in quick_response.headers
     assert freshrss.star_calls
-    assert forms[0].get("action", "").endswith("/read")
+    assert star_form.has_attr("data-state-form")
+    assert str(star_form.get("action", "")).endswith("/state")
+    assert star_button.get("name") == "state_action"
+    assert read_button.get("name") == "state_action"
+
+    fallback_payload = {
+        **payload,
+        "state_action": str(read_button.get("value")),
+    }
+    fallback_response = client.post(
+        str(star_url),
+        data=fallback_payload,
+        follow_redirects=False,
+    )
+    assert fallback_response.status_code == 303
+    assert freshrss.read_calls
 
 
 def test_stream_has_progressive_book_style_page_controls(tmp_path: Path):
@@ -685,6 +894,26 @@ def test_stream_has_progressive_book_style_page_controls(tmp_path: Path):
     assert controls.select_one('[aria-label="Older articles"]') is not None
     assert soup.select_one("[data-stream-page-status]") is not None
     assert soup.select_one('[data-paged-stream][data-stream-offset="0"]') is not None
+
+    next_page_url = controls.get("data-page-next-url")
+    assert next_page_url
+    next_page = BeautifulSoup(client.get(str(next_page_url)).text, "html.parser")
+    assert next_page.select_one(
+        '[data-paged-stream][data-stream-offset="2"]'
+    ) is not None
+
+
+def test_pre_upgrade_numeric_cursor_restarts_the_stream_safely(tmp_path: Path):
+    client, freshrss, _ = build_app(tmp_path)
+
+    response = client.get(
+        "/?c=sorted-offset%3A15",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    assert freshrss.stream_calls == []
 
 
 def test_article_has_cached_script_and_progressive_page_controls(tmp_path: Path):

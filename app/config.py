@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+MAX_STREAM_ITEMS_LIMIT = 100
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -18,7 +20,7 @@ class Settings:
     freshrss_api_url: str | None
     freshrss_username: str | None
     freshrss_api_password: str | None
-    entry_cache_seconds: int = 300
+    entry_cache_seconds: int = 21600
     stream_cache_seconds: int = 60
     article_prewarm_count: int = 2
     app_auth_username: str | None = None
@@ -41,6 +43,13 @@ class Settings:
     source_bridge_prewarm_interval_seconds: int = 60
     backup_directory: Path | None = None
     backup_retention_count: int = 7
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "max_stream_items",
+            max(1, min(MAX_STREAM_ITEMS_LIMIT, self.max_stream_items)),
+        )
 
 
 def _resolve_optional_path(base_dir: Path, raw_value: str | None) -> Path | None:
@@ -85,7 +94,7 @@ def get_settings() -> Settings:
         ),
         max_stream_items=int(os.getenv("MAX_STREAM_ITEMS", "15")),
         metadata_cache_seconds=int(os.getenv("METADATA_CACHE_SECONDS", "60")),
-        entry_cache_seconds=max(0, int(os.getenv("ENTRY_CACHE_SECONDS", "300"))),
+        entry_cache_seconds=max(0, int(os.getenv("ENTRY_CACHE_SECONDS", "21600"))),
         stream_cache_seconds=max(0, int(os.getenv("STREAM_CACHE_SECONDS", "60"))),
         article_prewarm_count=max(0, int(os.getenv("ARTICLE_PREWARM_COUNT", "2"))),
         freshrss_api_url=(os.getenv("FRESHRSS_API_URL") or "").strip() or None,

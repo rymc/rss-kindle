@@ -60,6 +60,15 @@ class ArticleCacheStats:
     database_bytes: int
 
 
+@dataclass(frozen=True)
+class PendingMutation:
+    entry_id: str
+    state_kind: str
+    enabled: bool
+    version: int
+    queued_at: str
+
+
 class Repository:
     def __init__(self, database: Database):
         self.database = database
@@ -251,6 +260,79 @@ class Repository:
             ).fetchone()
         return str(row["payload"]) if row is not None else None
 
+    def queue_mutation(
+        self,
+        entry_id: str,
+        *,
+        state_kind: str,
+        enabled: bool,
+    ) -> PendingMutation:
+        if state_kind not in {"read", "starred"}:
+            raise ValueError(f"Unsupported mutation state: {state_kind}")
+        queued_at = utc_now_iso()
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO pending_mutations (
+                    entry_id, state_kind, enabled, version, queued_at
+                )
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(entry_id, state_kind) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    version = pending_mutations.version + 1,
+                    queued_at = excluded.queued_at
+                """,
+                (entry_id, state_kind, int(enabled), queued_at),
+            )
+            row = connection.execute(
+                """
+                SELECT entry_id, state_kind, enabled, version, queued_at
+                FROM pending_mutations
+                WHERE entry_id = ? AND state_kind = ?
+                """,
+                (entry_id, state_kind),
+            ).fetchone()
+            connection.commit()
+        if row is None:  # pragma: no cover - SQLite returns the inserted row
+            raise RuntimeError("Could not queue the FreshRSS mutation.")
+        return _pending_mutation_from_row(row)
+
+    def list_pending_mutations(
+        self, *, limit: int | None = 100
+    ) -> list[PendingMutation]:
+        query = """
+            SELECT entry_id, state_kind, enabled, version, queued_at
+            FROM pending_mutations
+            ORDER BY queued_at ASC, entry_id ASC
+        """
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (max(1, limit),)
+        with self.database.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [_pending_mutation_from_row(row) for row in rows]
+
+    def acknowledge_mutations(
+        self, mutations: list[PendingMutation]
+    ) -> list[str]:
+        if not mutations:
+            return []
+        acknowledged_entry_ids: list[str] = []
+        with self.database.connect() as connection:
+            for mutation in mutations:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM pending_mutations
+                    WHERE entry_id = ? AND state_kind = ? AND version = ?
+                    """,
+                    (mutation.entry_id, mutation.state_kind, mutation.version),
+                )
+                if cursor.rowcount > 0:
+                    acknowledged_entry_ids.append(mutation.entry_id)
+            connection.commit()
+        return acknowledged_entry_ids
+
     def get_article_cache_stats(self) -> ArticleCacheStats:
         with self.database.connect() as connection:
             row = connection.execute(
@@ -380,6 +462,30 @@ class Repository:
             rows = connection.execute(query, params).fetchall()
         return [SyntheticFeedItem(**dict(row)) for row in rows]
 
+    def get_synthetic_feed_item(
+        self, source_id: str, item_id: str
+    ) -> SyntheticFeedItem | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    source_id,
+                    item_id,
+                    article_url,
+                    title,
+                    summary_text,
+                    content_html,
+                    published_at,
+                    source_page_url,
+                    sort_index,
+                    discovered_at
+                FROM synthetic_feed_items
+                WHERE source_id = ? AND item_id = ?
+                """,
+                (source_id, item_id),
+            ).fetchone()
+        return SyntheticFeedItem(**dict(row)) if row is not None else None
+
     def count_synthetic_feed_items(self, source_id: str) -> int:
         with self.database.connect() as connection:
             row = connection.execute(
@@ -461,3 +567,13 @@ class Repository:
                 (source_id, attempted_at, error_message),
             )
             connection.commit()
+
+
+def _pending_mutation_from_row(row) -> PendingMutation:
+    return PendingMutation(
+        entry_id=str(row["entry_id"]),
+        state_kind=str(row["state_kind"]),
+        enabled=bool(row["enabled"]),
+        version=int(row["version"]),
+        queued_at=str(row["queued_at"]),
+    )

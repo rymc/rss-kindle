@@ -32,6 +32,7 @@ from app.freshrss import (
     FreshRSSNavigation,
     FreshRSSStreamPage,
 )
+from app.mutations import MutationService
 from app.repository import Repository
 from app.utils import format_datetime, format_relative_time
 
@@ -73,6 +74,7 @@ class WebServices:
     settings: Settings
     repository: Repository
     freshrss: FreshRSSService
+    mutations: MutationService
     extractor: ArticleService
     backup: BackupService
     admin: AdminService
@@ -124,12 +126,15 @@ def build_template_context(
     active_group_slug: str | None = None,
     active_feed_id: str | None = None,
     show_site_header: bool = True,
+    include_navigation: bool = False,
     include_feeds: bool = False,
     reader_script: bool = False,
 ) -> dict[str, Any]:
     groups: list[FreshRSSGroup] = []
     feeds: list[FreshRSSFeed] = []
-    if show_site_header:
+    if show_site_header and (
+        include_navigation or include_feeds or active_group_slug is not None
+    ):
         try:
             navigation = services.freshrss.list_navigation()
         except (
@@ -174,6 +179,36 @@ def action_response(
     return RedirectResponse(
         sanitize_next_path(next_path, default=default), status_code=303
     )
+
+
+def reader_template_response(
+    services: WebServices,
+    request: Request,
+    *,
+    name: str,
+    context: dict[str, Any],
+    background: Any = None,
+) -> Response:
+    response = services.templates.TemplateResponse(
+        request=request,
+        name=name,
+        context=context,
+        background=background,
+    )
+    body = getattr(response, "body", b"")
+    etag = f'W/"{hashlib.sha256(body).hexdigest()[:24]}"'
+    validators = {
+        value.strip()
+        for value in request.headers.get("if-none-match", "").split(",")
+        if value.strip()
+    }
+    if etag in validators or "*" in validators:
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Cache-Control": "private, no-cache"},
+        )
+    response.headers["ETag"] = etag
+    return response
 
 
 def install_request_middleware(app: FastAPI, services: WebServices) -> None:
@@ -239,14 +274,30 @@ def install_request_middleware(app: FastAPI, services: WebServices) -> None:
         timings.append(f"total;dur={(time.perf_counter() - started_at) * 1000:.1f}")
         response.headers["Server-Timing"] = ", ".join(timings)
         response.headers["X-RSS-Kindle-Version"] = __version__
-        return set_security_headers(response, static_asset=path.startswith("/static/"))
+        return set_security_headers(
+            response,
+            static_asset=path.startswith("/static/"),
+            history_cache=(
+                request.method in {"GET", "HEAD"}
+                and response.status_code in {200, 304}
+                and _is_reader_page(path)
+            ),
+        )
 
 
-def set_security_headers(response: Response, *, static_asset: bool = False) -> Response:
-    response.headers.setdefault(
-        "Cache-Control",
-        "public, max-age=31536000, immutable" if static_asset else "no-store",
-    )
+def set_security_headers(
+    response: Response,
+    *,
+    static_asset: bool = False,
+    history_cache: bool = False,
+) -> Response:
+    if static_asset:
+        cache_control = "public, max-age=31536000, immutable"
+    elif history_cache:
+        cache_control = "private, no-cache"
+    else:
+        cache_control = "no-store"
+    response.headers.setdefault("Cache-Control", cache_control)
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
@@ -259,6 +310,14 @@ def set_security_headers(response: Response, *, static_asset: bool = False) -> R
     return response
 
 
+def _is_reader_page(path: str) -> bool:
+    return (
+        path == "/"
+        or path in {"/starred", "/categories", "/feeds"}
+        or path.startswith(("/groups/", "/feeds/", "/read/", "/items/"))
+    )
+
+
 def allowed_reader_hosts(configured_hosts: tuple[str, ...]) -> list[str]:
     allowed_hosts = list(configured_hosts)
     for host in ("127.0.0.1", "localhost"):
@@ -268,7 +327,12 @@ def allowed_reader_hosts(configured_hosts: tuple[str, ...]) -> list[str]:
 
 
 def close_services(services: WebServices) -> None:
-    for service in (services.admin, services.extractor, services.freshrss):
+    for service in (
+        services.mutations,
+        services.admin,
+        services.extractor,
+        services.freshrss,
+    ):
         close = getattr(service, "close", None)
         if callable(close):
             close()

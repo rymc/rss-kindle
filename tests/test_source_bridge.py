@@ -8,7 +8,7 @@ import pytest
 
 from app.config import Settings
 from app.db import Database
-from app.repository import Repository
+from app.repository import Repository, SyntheticFeedItem
 from app.source_bridge import (
     AuthProfile,
     SourceBridgeService,
@@ -16,7 +16,7 @@ from app.source_bridge import (
     SourceDefinition,
 )
 from app.source_config import SourceBridgeError
-from app.utils import utc_now
+from app.utils import stable_hash, utc_now
 
 
 class FakeResponse:
@@ -486,6 +486,27 @@ def test_source_bridge_accepts_and_caches_an_empty_first_refresh(tmp_path: Path)
     assert state is not None
     assert state.last_successful_at is not None
     assert state.last_error is None
+
+
+def test_source_bridge_throttles_a_second_cold_build_after_failure(tmp_path: Path):
+    settings = build_settings(tmp_path, refresh_seconds=900)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    client = RecordingClient({"https://www.ft.com/": RuntimeError("boom")})
+    service = SourceBridgeService(
+        settings,
+        repository,
+        catalog=build_catalog(),
+        client_factory=lambda: client,
+    )
+
+    with pytest.raises(SourceBridgeError, match="boom"):
+        service.build_feed("ft-home")
+
+    second_xml = service.build_feed("ft-home")
+
+    assert "<item>" not in second_xml
+    assert [url for url, _, _ in client.calls] == ["https://www.ft.com/"]
 
 
 def test_source_bridge_keeps_snapshot_when_discovery_is_empty(tmp_path: Path):
@@ -1244,3 +1265,48 @@ def test_source_bridge_can_extract_article_for_matching_url(tmp_path: Path):
     assert article.title == "Lead story"
     assert "content:encoded" not in article.content_html
     assert "first paragraph of the lead story" in article.content_html
+
+
+def test_source_bridge_extracts_stored_full_content_without_fetching(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    repository = Repository(Database(settings.database_path))
+    repository.initialize()
+    article_url = "https://www.ft.com/content/story-1?edition=uk"
+    repository.replace_synthetic_feed_items(
+        "ft-home",
+        [
+            SyntheticFeedItem(
+                source_id="ft-home",
+                item_id=stable_hash(article_url),
+                article_url=article_url,
+                title="Stored lead story",
+                summary_text="Stored summary",
+                content_html="<article><p>Stored full article.</p></article>",
+                published_at="2026-03-30T12:00:00+00:00",
+                source_page_url="https://www.ft.com/",
+                sort_index=0,
+                discovered_at="2026-03-30T12:01:00+00:00",
+            )
+        ],
+    )
+    client = RecordingClient({})
+    factory_calls: list[bool] = []
+
+    def client_factory():
+        factory_calls.append(True)
+        return client
+
+    service = SourceBridgeService(
+        settings,
+        repository,
+        catalog=build_catalog(),
+        client_factory=client_factory,
+    )
+
+    article = service.extract_article(f"{article_url}#reader")
+
+    assert article.article_url == article_url
+    assert article.title == "Stored lead story"
+    assert article.content_html == "<article><p>Stored full article.</p></article>"
+    assert factory_calls == []
+    assert client.calls == []

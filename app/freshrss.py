@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import threading
 import time
+import zlib
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -20,10 +22,19 @@ from app.utils import slugify, strip_html
 READ_STATE = "user/-/state/com.google/read"
 STARRED_STATE = "user/-/state/com.google/starred"
 READING_LIST_STREAM = "reading-list"
-GROUP_CONTINUATION_PREFIX = "group-offset:"
-SORTED_CONTINUATION_PREFIX = "sorted-offset:"
 STREAM_PAGE_CACHE_LIMIT = 64
-STREAM_SCAN_CACHE_ENTRY_BUDGET = 512
+STREAM_CACHE_HTML_CHARS = 2_048
+STREAM_CACHE_TEXT_CHARS = 512
+STREAM_CACHE_STALE_GRACE_SECONDS = 300
+ENTRY_CACHE_LIMIT = 512
+ENTRY_CACHE_BYTES_LIMIT = 16 * 1024 * 1024
+LOCAL_STATE_GRACE_SECONDS = 300
+CURSOR_ANCHOR_CACHE_LIMIT = 128
+STATE_SCAN_CHUNK_SIZE = 100
+STATE_SCAN_REQUEST_LIMIT = 10
+OVERLAY_CONTINUATION_PREFIX = "rk1."
+OVERLAY_CONTINUATION_MAX_ITEMS = 100
+OVERLAY_CONTINUATION_MAX_BYTES = 65_536
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +84,7 @@ class FreshRSSStreamPage:
     entries: list[FreshRSSEntry]
     continuation: str | None
     is_stale: bool = False
+    entries_are_compact: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,17 +94,18 @@ class FreshRSSNavigation:
 
 
 @dataclass
-class _StreamScanSnapshot:
-    expires_at: float
-    entries: list[FreshRSSEntry]
-    continuation: str | None
-    complete: bool
-
-
-@dataclass
 class _StreamRefreshState:
     lock: threading.Lock
     users: int = 0
+
+
+@dataclass(frozen=True)
+class _OverlayContinuation:
+    scope_kind: str
+    scope_value: str | None
+    upstream: str | None
+    carried_entry_ids: tuple[str, ...]
+    shown_entry_ids: tuple[str, ...]
 
 
 def normalize_freshrss_api_url(value: str) -> str:
@@ -148,6 +161,7 @@ class FreshRSSClient:
             None if client_factory is not None else self._default_client_factory()
         )
         self._lock = threading.Lock()
+        self._state_update_lock = threading.Lock()
         self._navigation_refresh_lock = threading.Lock()
         self._stream_refresh_states: dict[
             tuple[str, str, str | None, bool], _StreamRefreshState
@@ -156,7 +170,8 @@ class FreshRSSClient:
         self._write_token: str | None = None
         self._navigation_cache: tuple[float, FreshRSSNavigation] | None = None
         self._navigation_retry_after = 0.0
-        self._entry_cache: dict[str, tuple[float, FreshRSSEntry]] = {}
+        self._entry_cache: dict[str, tuple[float, FreshRSSEntry, int]] = {}
+        self._entry_cache_bytes = 0
         self._stream_cache: dict[
             tuple[str, str | None, str | None, int, bool],
             tuple[float, FreshRSSStreamPage],
@@ -164,10 +179,11 @@ class FreshRSSClient:
         self._stream_retry_after: dict[
             tuple[str, str | None, str | None, int, bool], float
         ] = {}
-        self._stream_scan_cache: dict[
-            tuple[str, bool], _StreamScanSnapshot
-        ] = {}
         self._stream_cache_generation = 0
+        self._local_state_overrides: dict[
+            tuple[Literal["read", "starred"], str], tuple[bool, float | None]
+        ] = {}
+        self._cursor_anchors: dict[tuple[str, str], str] = {}
 
     def _default_client_factory(self) -> httpx.Client:
         return httpx.Client(
@@ -271,6 +287,7 @@ class FreshRSSClient:
         cached: tuple[float, FreshRSSStreamPage] | None = None
         if self.settings.stream_cache_seconds > 0:
             with self._lock:
+                self._prune_stream_cache_locked(now)
                 self._prune_stream_retry_after_locked(now)
                 cache_generation = self._stream_cache_generation
                 cached = self._stream_cache.get(cache_key)
@@ -283,6 +300,7 @@ class FreshRSSClient:
         with self._stream_singleflight(refresh_key):
             now = time.monotonic()
             with self._lock:
+                self._prune_stream_cache_locked(now)
                 self._prune_stream_retry_after_locked(now)
                 cache_generation = self._stream_cache_generation
                 cached = self._stream_cache.get(cache_key)
@@ -326,26 +344,307 @@ class FreshRSSClient:
         limit: int,
         include_read: bool,
     ) -> FreshRSSStreamPage:
-        navigation = self.list_navigation()
-        if scope_kind == "group":
-            page = self._get_group_stream(
-                scope_value=scope_value,
-                continuation=continuation,
+        overlay = _decode_overlay_continuation(continuation)
+        if continuation and continuation.startswith(OVERLAY_CONTINUATION_PREFIX):
+            if overlay is None:
+                raise FreshRSSError("Invalid local stream continuation.")
+            if (
+                overlay.scope_kind != scope_kind
+                or overlay.scope_value != scope_value
+            ):
+                raise FreshRSSError("Stream continuation does not match this view.")
+        upstream_continuation = overlay.upstream if overlay else continuation
+        navigation = (
+            self._cached_navigation_or_empty()
+            if scope_kind in {"home", "starred"}
+            else self.list_navigation()
+        )
+        stream_id = self._stream_id_for_scope(
+            scope_kind,
+            scope_value,
+            navigation,
+        )
+        resolved_carries: list[FreshRSSEntry] = []
+        deferred_carry_ids: tuple[str, ...] = ()
+        if overlay:
+            resolved_carries, deferred_carry_ids = self._resolve_overlay_entries(
+                overlay.carried_entry_ids,
                 limit=limit,
+            )
+        carried_entries = (
+            self._filter_stream_entries(
+                resolved_carries,
+                scope_kind=scope_kind,
+                scope_value=scope_value,
                 navigation=navigation,
                 include_read=include_read,
             )
-        else:
-            page = self._get_sorted_stream(
-                scope_kind=scope_kind,
-                scope_value=scope_value,
-                continuation=continuation,
-                limit=limit,
+            if overlay
+            else []
+        )
+        if overlay and (deferred_carry_ids or len(carried_entries) >= limit):
+            page = FreshRSSStreamPage(
+                entries=carried_entries[:limit],
+                continuation=_encode_overlay_continuation(
+                    replace(
+                        overlay,
+                        carried_entry_ids=tuple(
+                            entry.id for entry in carried_entries[limit:]
+                        )
+                        + deferred_carry_ids,
+                    )
+                ),
+            )
+            self._cache_entries(page.entries)
+            return page
+
+        fetch_limit = limit
+        if overlay:
+            fetch_limit = (
+                limit - len(carried_entries) + len(overlay.shown_entry_ids)
+            )
+        starred_anchor_state = (
+            self._cursor_outside_filtered_state(
+                upstream_continuation,
+                "starred",
+                stream_id=stream_id,
+            )
+            if upstream_continuation and scope_kind == "starred"
+            else False
+        )
+        if overlay and upstream_continuation is None:
+            page = FreshRSSStreamPage(entries=[], continuation=None)
+        elif upstream_continuation and not include_read:
+            page = self._fetch_locally_filtered_continuation(
+                stream_id=stream_id,
                 navigation=navigation,
-                include_read=include_read,
+                continuation=upstream_continuation,
+                limit=fetch_limit,
+                state_kind="read",
+            )
+        elif (
+            upstream_continuation
+            and scope_kind == "starred"
+            and starred_anchor_state is not False
+        ):
+            page = self._fetch_locally_filtered_continuation(
+                stream_id=READING_LIST_STREAM,
+                navigation=navigation,
+                continuation=upstream_continuation,
+                limit=fetch_limit,
+                state_kind="starred",
+            )
+        else:
+            page = self._fetch_stream_page(
+                stream_id=stream_id,
+                navigation=navigation,
+                continuation=upstream_continuation,
+                limit=fetch_limit,
+                exclude_read=not include_read,
+            )
+        fetched_entry_ids = {entry.id for entry in page.entries}
+        self._cache_entries(page.entries)
+        page = self._overlay_stream_page(
+            page,
+            scope_kind=scope_kind,
+            scope_value=scope_value,
+            navigation=navigation,
+            continuation=continuation,
+            include_read=include_read,
+            limit=limit,
+        )
+        if overlay:
+            page = self._continue_overlay_page(
+                page,
+                overlay=overlay,
+                carried_entries=carried_entries,
+                fetched_entry_ids=fetched_entry_ids,
+                limit=limit,
             )
         self._cache_entries(page.entries)
         return page
+
+    def _resolve_overlay_entries(
+        self,
+        entry_ids: Iterable[str],
+        *,
+        limit: int,
+    ) -> tuple[list[FreshRSSEntry], tuple[str, ...]]:
+        ordered_ids = list(dict.fromkeys(entry_ids))
+        selected_ids = ordered_ids[: max(1, limit)]
+        deferred_ids = tuple(ordered_ids[len(selected_ids) :])
+        entries_by_id: dict[str, FreshRSSEntry] = {}
+        missing_ids: list[str] = []
+        for entry_id in selected_ids:
+            entry = self._get_cached_entry(entry_id)
+            if entry is not None:
+                entries_by_id[entry_id] = entry
+            else:
+                missing_ids.append(entry_id)
+        if missing_ids:
+            entries_by_id.update(self._fetch_overlay_entries(missing_ids))
+        return (
+            [
+                entries_by_id[entry_id]
+                for entry_id in selected_ids
+                if entry_id in entries_by_id
+            ],
+            deferred_ids,
+        )
+
+    def _continue_overlay_page(
+        self,
+        page: FreshRSSStreamPage,
+        *,
+        overlay: _OverlayContinuation,
+        carried_entries: list[FreshRSSEntry],
+        fetched_entry_ids: set[str],
+        limit: int,
+    ) -> FreshRSSStreamPage:
+        scheduled_ids = set(overlay.shown_entry_ids)
+        merged = list(carried_entries)
+        present_ids = {entry.id for entry in merged}
+        for entry in page.entries:
+            if entry.id in scheduled_ids or entry.id in present_ids:
+                continue
+            merged.append(entry)
+            present_ids.add(entry.id)
+
+        visible = merged[:limit]
+        remaining = merged[limit:]
+        remaining_scheduled_ids = tuple(
+            entry_id
+            for entry_id in overlay.shown_entry_ids
+            if entry_id not in fetched_entry_ids
+            and _entry_can_follow_continuation(entry_id, page.continuation)
+        )
+        continuation = _encode_overlay_continuation(
+            replace(
+                overlay,
+                upstream=page.continuation,
+                carried_entry_ids=tuple(entry.id for entry in remaining),
+                shown_entry_ids=remaining_scheduled_ids,
+            )
+        )
+        return replace(page, entries=visible, continuation=continuation)
+
+    def _fetch_locally_filtered_continuation(
+        self,
+        *,
+        stream_id: str,
+        navigation: FreshRSSNavigation,
+        continuation: str,
+        limit: int,
+        state_kind: Literal["read", "starred"],
+    ) -> FreshRSSStreamPage:
+        """Keep a mutable state filter from removing FreshRSS's cursor anchor."""
+        entries: list[FreshRSSEntry] = []
+        cursor: str | None = continuation
+        seen = {continuation}
+        request_count = 0
+        numeric_cursor = continuation.isdigit()
+        while (
+            cursor
+            and len(entries) < limit
+            and request_count < STATE_SCAN_REQUEST_LIMIT
+        ):
+            remaining = limit - len(entries)
+            request_limit = (
+                remaining
+                if request_count == 0 or not numeric_cursor
+                else STATE_SCAN_CHUNK_SIZE
+            )
+            raw_page = self._fetch_stream_page(
+                stream_id=stream_id,
+                navigation=navigation,
+                continuation=cursor,
+                limit=request_limit,
+                exclude_read=False,
+            )
+            request_count += 1
+            raw_entries = self._overlay_entries(raw_page.entries)
+            matching_entries = [
+                entry
+                for entry in raw_entries
+                if (not entry.is_read if state_kind == "read" else entry.is_starred)
+            ]
+            for entry in matching_entries:
+                entries.append(entry)
+                if len(entries) == limit:
+                    selected_cursor = (
+                        _continuation_from_entry_id(entry.id)
+                        if numeric_cursor
+                        else raw_page.continuation
+                    )
+                    if selected_cursor is not None:
+                        self._remember_cursor_anchor(
+                            stream_id,
+                            selected_cursor,
+                            entry.id,
+                        )
+                        return FreshRSSStreamPage(
+                            entries=entries,
+                            continuation=selected_cursor,
+                        )
+                    return FreshRSSStreamPage(
+                        entries=entries,
+                        continuation=raw_page.continuation,
+                    )
+
+            next_cursor = raw_page.continuation
+            if not next_cursor or next_cursor in seen:
+                return FreshRSSStreamPage(entries=entries, continuation=None)
+            seen.add(next_cursor)
+            cursor = next_cursor
+            numeric_cursor = numeric_cursor and next_cursor.isdigit()
+        return FreshRSSStreamPage(entries=entries, continuation=cursor)
+
+    def _cursor_outside_filtered_state(
+        self,
+        continuation: str,
+        state_kind: Literal["read", "starred"],
+        *,
+        stream_id: str,
+    ) -> bool | None:
+        with self._lock:
+            entry_id = self._cursor_anchors.get((stream_id, continuation))
+        entry_id = entry_id or _entry_id_from_continuation(continuation)
+        if entry_id is None:
+            return None
+        with self._lock:
+            local_override = self._local_state_overrides.get((state_kind, entry_id))
+        if local_override is not None:
+            entry = self._get_cached_entry(entry_id)
+            if entry is None:
+                entry = self.get_entry(entry_id)
+        elif state_kind == "starred":
+            entry = self._fetch_entry(entry_id)
+        else:
+            entry = self._get_cached_entry(entry_id) or self.get_entry(entry_id)
+        if entry is None:
+            return None
+        return entry.is_read if state_kind == "read" else not entry.is_starred
+
+    def _remember_cursor_anchor(
+        self,
+        stream_id: str,
+        continuation: str,
+        entry_id: str,
+    ) -> None:
+        with self._lock:
+            key = (stream_id, continuation)
+            self._cursor_anchors.pop(key, None)
+            self._cursor_anchors[key] = entry_id
+            while len(self._cursor_anchors) > CURSOR_ANCHOR_CACHE_LIMIT:
+                oldest = next(iter(self._cursor_anchors))
+                self._cursor_anchors.pop(oldest, None)
+
+    def _cached_navigation_or_empty(self) -> FreshRSSNavigation:
+        with self._lock:
+            cached = self._navigation_cache
+        if cached is not None:
+            return cached[1]
+        return FreshRSSNavigation(groups=[], feeds=[])
 
     def _store_stream_cache(
         self,
@@ -358,6 +657,7 @@ class FreshRSSClient:
             return
         expires_at = time.monotonic() + self.settings.stream_cache_seconds
         with self._lock:
+            self._prune_stream_cache_locked(time.monotonic())
             self._prune_stream_retry_after_locked(time.monotonic())
             if expected_generation != self._stream_cache_generation:
                 return
@@ -372,7 +672,24 @@ class FreshRSSClient:
                 )
                 self._stream_cache.pop(oldest_key, None)
                 self._stream_retry_after.pop(oldest_key, None)
-            self._stream_cache[cache_key] = (expires_at, page)
+            self._stream_cache[cache_key] = (
+                expires_at,
+                replace(
+                    page,
+                    entries=[_stream_cache_entry(entry) for entry in page.entries],
+                    entries_are_compact=True,
+                ),
+            )
+
+    def _prune_stream_cache_locked(self, now: float) -> None:
+        expired_keys = [
+            key
+            for key, (expires_at, _) in self._stream_cache.items()
+            if expires_at + STREAM_CACHE_STALE_GRACE_SECONDS <= now
+        ]
+        for key in expired_keys:
+            self._stream_cache.pop(key, None)
+            self._stream_retry_after.pop(key, None)
 
     def _prune_stream_retry_after_locked(self, now: float) -> None:
         if not self._stream_retry_after:
@@ -387,30 +704,55 @@ class FreshRSSClient:
         cached = self._get_cached_entry(entry_id)
         if cached is not None:
             return cached
-        navigation = self.list_navigation()
-        params = {"output": "json", "i": entry_id}
-        for method, include_token in (("GET", False), ("POST", False), ("POST", True)):
-            try:
-                payload = self._request_json(
-                    method,
-                    "/reader/api/0/stream/items/contents",
-                    params=params if method == "GET" else None,
-                    data=params if method == "POST" else None,
-                    require_write_token=include_token,
-                )
-            except httpx.HTTPError:
-                continue
-            items = payload.get("items") or []
-            if not items:
+        return self._fetch_entry(entry_id)
+
+    def _fetch_entry(self, entry_id: str) -> FreshRSSEntry | None:
+        return self._fetch_entry_response(entry_id, suppress_http_errors=True)
+
+    def _fetch_overlay_entries(
+        self, entry_ids: Iterable[str]
+    ) -> dict[str, FreshRSSEntry]:
+        ids = list(dict.fromkeys(entry_ids))
+        if not ids:
+            return {}
+        return self._fetch_entries_response(ids)
+
+    def _fetch_entry_response(
+        self,
+        entry_id: str,
+        *,
+        suppress_http_errors: bool,
+    ) -> FreshRSSEntry | None:
+        try:
+            entries = self._fetch_entries_response([entry_id])
+        except httpx.HTTPError:
+            if suppress_http_errors:
                 return None
-            entry = self._parse_entry(items[0], navigation)
-            if entry is not None:
-                self._cache_entries([entry])
-            return entry
-        return None
+            raise
+        return entries.get(entry_id)
+
+    def _fetch_entries_response(
+        self, entry_ids: list[str]
+    ) -> dict[str, FreshRSSEntry]:
+        navigation = self._cached_navigation_or_empty()
+        payload = self._request_json(
+            "POST",
+            "/reader/api/0/stream/items/contents",
+            data=[("output", "json"), *(("i", entry_id) for entry_id in entry_ids)],
+        )
+        items = payload.get("items") or []
+        parsed = [
+            entry
+            for item in items
+            if (entry := self._parse_entry(item, navigation)) is not None
+        ]
+        entries = self._overlay_entries(parsed)
+        self._cache_entries(entries)
+        requested_ids = set(entry_ids)
+        return {entry.id: entry for entry in entries if entry.id in requested_ids}
 
     def get_latest_entry(self) -> FreshRSSEntry | None:
-        navigation = self.list_navigation()
+        navigation = self._cached_navigation_or_empty()
         page = self._fetch_stream_page(
             stream_id=READING_LIST_STREAM,
             navigation=navigation,
@@ -418,6 +760,7 @@ class FreshRSSClient:
             limit=1,
             exclude_read=False,
         )
+        page = replace(page, entries=self._overlay_entries(page.entries))
         self._cache_entries(page.entries)
         return page.entries[0] if page.entries else None
 
@@ -440,38 +783,386 @@ class FreshRSSClient:
         return _timestamp_to_iso(payload.get("last_refreshed_on_time"))
 
     def mark_read(self, entry_ids: Iterable[str]) -> None:
-        ids = self._edit_tags(entry_ids, add=READ_STATE)
-        self._set_cached_read(ids, True)
+        ids = self.send_state("read", entry_ids, True)
+        self.apply_local_state("read", ids, True)
+        self.confirm_local_state("read", ids, True)
 
     def mark_unread(self, entry_ids: Iterable[str]) -> None:
-        ids = self._edit_tags(entry_ids, remove=READ_STATE)
-        self._set_cached_entry_read(ids, False)
-        self._clear_stream_cache()
+        ids = self.send_state("read", entry_ids, False)
+        self.apply_local_state("read", ids, False)
+        self.confirm_local_state("read", ids, False)
 
     def mark_starred(self, entry_ids: Iterable[str]) -> None:
-        ids = self._edit_tags(entry_ids, add=STARRED_STATE)
-        self._set_cached_starred(ids, True)
-        self._set_cached_stream_starred(ids, True)
-        self._clear_stream_cache(scope_kind="starred")
+        ids = self.send_state("starred", entry_ids, True)
+        self.apply_local_state("starred", ids, True)
+        self.confirm_local_state("starred", ids, True)
 
     def mark_unstarred(self, entry_ids: Iterable[str]) -> None:
-        ids = self._edit_tags(entry_ids, remove=STARRED_STATE)
-        self._set_cached_starred(ids, False)
-        self._set_cached_stream_starred(ids, False)
-        self._clear_stream_cache(scope_kind="starred")
+        ids = self.send_state("starred", entry_ids, False)
+        self.apply_local_state("starred", ids, False)
+        self.confirm_local_state("starred", ids, False)
+
+    def send_state(
+        self,
+        kind: Literal["read", "starred"],
+        entry_ids: Iterable[str],
+        enabled: bool,
+    ) -> list[str]:
+        """Write state to FreshRSS without changing local caches."""
+        if kind == "read":
+            state = READ_STATE
+        elif kind == "starred":
+            state = STARRED_STATE
+        else:
+            raise ValueError(f"Unsupported FreshRSS state kind: {kind}")
+        return self._edit_tags(
+            entry_ids,
+            add=state if enabled else None,
+            remove=None if enabled else state,
+        )
+
+    def apply_local_state(
+        self,
+        kind: Literal["read", "starred"],
+        entry_ids: Iterable[str],
+        enabled: bool,
+    ) -> None:
+        """Change cached state without sending an upstream request."""
+        ids = [
+            str(entry_id).strip()
+            for entry_id in entry_ids
+            if str(entry_id).strip()
+        ]
+        with self._state_update_lock:
+            with self._lock:
+                for entry_id in ids:
+                    self._local_state_overrides[(kind, entry_id)] = (
+                        enabled,
+                        None,
+                    )
+            if kind == "read":
+                if enabled:
+                    self._set_cached_read(ids, True)
+                else:
+                    self._set_cached_entry_read(ids, False)
+                    self._clear_stream_cache()
+                return
+            if kind == "starred":
+                self._set_cached_starred(ids, enabled)
+                self._set_cached_stream_starred(ids, enabled)
+                self._clear_stream_cache(scope_kind="starred")
+                return
+        raise ValueError(f"Unsupported FreshRSS state kind: {kind}")
+
+    def confirm_local_state(
+        self,
+        kind: Literal["read", "starred"],
+        entry_ids: Iterable[str],
+        enabled: bool,
+    ) -> None:
+        """Keep an acknowledged state long enough to fence in-flight stale reads."""
+        expires_at = time.monotonic() + LOCAL_STATE_GRACE_SECONDS
+        with self._lock:
+            for raw_entry_id in entry_ids:
+                entry_id = str(raw_entry_id).strip()
+                key = (kind, entry_id)
+                current = self._local_state_overrides.get(key)
+                if current is not None and current[0] == enabled:
+                    self._local_state_overrides[key] = (enabled, expires_at)
+
+    def _prune_local_state_overrides_locked(self, now: float) -> None:
+        expired = [
+            key
+            for key, (_, expires_at) in self._local_state_overrides.items()
+            if expires_at is not None and expires_at <= now
+        ]
+        for key in expired:
+            self._local_state_overrides.pop(key, None)
+
+    def _overlay_entry_locked(self, entry: FreshRSSEntry) -> FreshRSSEntry:
+        read = self._local_state_overrides.get(("read", entry.id))
+        starred = self._local_state_overrides.get(("starred", entry.id))
+        return replace(
+            entry,
+            is_read=read[0] if read is not None else entry.is_read,
+            is_starred=starred[0] if starred is not None else entry.is_starred,
+        )
+
+    def _overlay_entries(
+        self, entries: Iterable[FreshRSSEntry]
+    ) -> list[FreshRSSEntry]:
+        now = time.monotonic()
+        with self._lock:
+            self._prune_local_state_overrides_locked(now)
+            return [self._overlay_entry_locked(entry) for entry in entries]
+
+    def _filter_stream_entries(
+        self,
+        entries: Iterable[FreshRSSEntry],
+        *,
+        scope_kind: str,
+        scope_value: str | None,
+        navigation: FreshRSSNavigation,
+        include_read: bool,
+    ) -> list[FreshRSSEntry]:
+        return [
+            entry
+            for entry in self._overlay_entries(entries)
+            if self._entry_belongs_to_scope(
+                entry,
+                scope_kind=scope_kind,
+                scope_value=scope_value,
+                navigation=navigation,
+            )
+            and (scope_kind != "starred" or entry.is_starred)
+            and (include_read or not entry.is_read)
+        ]
+
+    def _overlay_stream_page(
+        self,
+        page: FreshRSSStreamPage,
+        *,
+        scope_kind: str,
+        scope_value: str | None,
+        navigation: FreshRSSNavigation,
+        continuation: str | None,
+        include_read: bool,
+        limit: int,
+    ) -> FreshRSSStreamPage:
+        now = time.monotonic()
+        entries = self._filter_stream_entries(
+            page.entries,
+            scope_kind=scope_kind,
+            scope_value=scope_value,
+            navigation=navigation,
+            include_read=include_read,
+        )
+        candidate_entry_ids: list[str] = []
+        resolved_missing: dict[str, FreshRSSEntry] = {}
+        deferred_missing_ids: list[str] = []
+        if continuation is None:
+            present_ids = {entry.id for entry in entries}
+            with self._lock:
+                self._prune_local_state_overrides_locked(now)
+                for (state_kind, entry_id), (
+                    enabled,
+                    _,
+                ) in self._local_state_overrides.items():
+                    if not self._override_adds_membership(
+                        state_kind=state_kind,
+                        enabled=enabled,
+                        scope_kind=scope_kind,
+                        include_read=include_read,
+                    ):
+                        continue
+                    if entry_id in present_ids:
+                        continue
+                    if entry_id not in candidate_entry_ids:
+                        candidate_entry_ids.append(entry_id)
+                    if len(candidate_entry_ids) > OVERLAY_CONTINUATION_MAX_ITEMS:
+                        raise FreshRSSError(
+                            "Too many pending changes for one Kindle stream."
+                        )
+                missing_entry_ids = []
+                for entry_id in candidate_entry_ids:
+                    cached = self._entry_cache.get(entry_id)
+                    if cached is None or cached[0] <= now:
+                        missing_entry_ids.append(entry_id)
+            chunk_size = max(1, min(limit, OVERLAY_CONTINUATION_MAX_ITEMS))
+            while missing_entry_ids:
+                available = self._filter_stream_entries(
+                    resolved_missing.values(),
+                    scope_kind=scope_kind,
+                    scope_value=scope_value,
+                    navigation=navigation,
+                    include_read=include_read,
+                )
+                with self._lock:
+                    cached_available = [
+                        self._overlay_entry_locked(cached[1])
+                        for entry_id in candidate_entry_ids
+                        if (cached := self._entry_cache.get(entry_id)) is not None
+                        and cached[0] > now
+                    ]
+                cached_available = self._filter_stream_entries(
+                    cached_available,
+                    scope_kind=scope_kind,
+                    scope_value=scope_value,
+                    navigation=navigation,
+                    include_read=include_read,
+                )
+                available_ids = {
+                    entry.id for entry in [*available, *cached_available]
+                }
+                if len(entries) + len(available_ids) >= limit:
+                    break
+                resolve_now = missing_entry_ids[:chunk_size]
+                missing_entry_ids = missing_entry_ids[chunk_size:]
+                resolved_missing.update(
+                    self._fetch_overlay_entries(resolve_now)
+                )
+            deferred_missing_ids = missing_entry_ids
+
+        with self._lock:
+            self._prune_local_state_overrides_locked(now)
+            additions: list[FreshRSSEntry] = []
+            if continuation is None:
+                present_ids = {entry.id for entry in entries}
+                active_candidate_ids = {
+                    entry_id
+                    for (state_kind, entry_id), (
+                        enabled,
+                        _,
+                    ) in self._local_state_overrides.items()
+                    if entry_id in candidate_entry_ids
+                    and self._override_adds_membership(
+                        state_kind=state_kind,
+                        enabled=enabled,
+                        scope_kind=scope_kind,
+                        include_read=include_read,
+                    )
+                }
+                deferred_missing_ids = [
+                    entry_id
+                    for entry_id in deferred_missing_ids
+                    if entry_id in active_candidate_ids and entry_id not in present_ids
+                ]
+                for entry_id in candidate_entry_ids:
+                    if entry_id not in active_candidate_ids:
+                        continue
+                    if entry_id in present_ids:
+                        continue
+                    cached = self._entry_cache.get(entry_id)
+                    if cached is not None and cached[0] > now:
+                        candidate = self._overlay_entry_locked(cached[1])
+                    else:
+                        resolved = resolved_missing.get(entry_id)
+                        if resolved is None:
+                            continue
+                        candidate = self._overlay_entry_locked(resolved)
+                    if self._entry_belongs_to_scope(
+                        candidate,
+                        scope_kind=scope_kind,
+                        scope_value=scope_value,
+                        navigation=navigation,
+                    ):
+                        additions.append(candidate)
+                        present_ids.add(entry_id)
+
+        additions = [
+            entry
+            for entry in additions
+            if (scope_kind != "starred" or entry.is_starred)
+            and (include_read or not entry.is_read)
+        ]
+        if not additions and not deferred_missing_ids:
+            return replace(page, entries=entries)
+        merged = [*additions, *entries]
+        visible = merged[:limit]
+        carried_entry_ids = [
+            *[entry.id for entry in merged[limit:]],
+            *deferred_missing_ids,
+        ]
+        scheduled_entry_ids = [
+            *[entry.id for entry in additions],
+            *deferred_missing_ids,
+        ]
+        overlay = _OverlayContinuation(
+            scope_kind=scope_kind,
+            scope_value=scope_value,
+            upstream=page.continuation,
+            carried_entry_ids=tuple(dict.fromkeys(carried_entry_ids)),
+            shown_entry_ids=tuple(
+                entry_id
+                for entry_id in dict.fromkeys(scheduled_entry_ids)
+                if _entry_can_follow_continuation(entry_id, page.continuation)
+            ),
+        )
+        return replace(
+            page,
+            entries=visible,
+            continuation=_encode_overlay_continuation(overlay),
+        )
+
+    @staticmethod
+    def _override_adds_membership(
+        *,
+        state_kind: Literal["read", "starred"],
+        enabled: bool,
+        scope_kind: str,
+        include_read: bool,
+    ) -> bool:
+        return (
+            scope_kind == "starred"
+            and state_kind == "starred"
+            and enabled
+        ) or (
+            scope_kind != "starred"
+            and not include_read
+            and state_kind == "read"
+            and not enabled
+        )
+
+    @staticmethod
+    def _entry_belongs_to_scope(
+        entry: FreshRSSEntry,
+        *,
+        scope_kind: str,
+        scope_value: str | None,
+        navigation: FreshRSSNavigation,
+    ) -> bool:
+        if scope_kind in {"home", "starred"}:
+            return True
+        if scope_kind == "feed":
+            return entry.feed_token == scope_value
+        if scope_kind == "group":
+            group = next(
+                (candidate for candidate in navigation.groups if candidate.slug == scope_value),
+                None,
+            )
+            if group is None:
+                return False
+            if group.name in entry.group_names:
+                return True
+            feed = next(
+                (
+                    candidate
+                    for candidate in navigation.feeds
+                    if candidate.token == entry.feed_token
+                ),
+                None,
+            )
+            return feed is not None and group.slug in feed.group_slugs
+        return False
 
     def _cache_entries(self, entries: Iterable[FreshRSSEntry]) -> None:
-        ttl = self.settings.entry_cache_seconds
-        if ttl <= 0:
+        configured_ttl = self.settings.entry_cache_seconds
+        if configured_ttl <= 0:
             return
         now = time.monotonic()
-        expires_at = now + ttl
+        expires_at = now + configured_ttl
         with self._lock:
-            self._entry_cache = {
-                key: value for key, value in self._entry_cache.items() if value[0] > now
-            }
+            self._prune_local_state_overrides_locked(now)
+            for entry_id, cached in list(self._entry_cache.items()):
+                if cached[0] <= now:
+                    self._drop_cached_entry_locked(entry_id)
             for entry in entries:
-                self._entry_cache[entry.id] = (expires_at, entry)
+                entry = self._overlay_entry_locked(entry)
+                self._drop_cached_entry_locked(entry.id)
+                entry_bytes = _entry_cache_size(entry)
+                self._entry_cache[entry.id] = (expires_at, entry, entry_bytes)
+                self._entry_cache_bytes += entry_bytes
+            while (
+                len(self._entry_cache) > ENTRY_CACHE_LIMIT
+                or self._entry_cache_bytes > ENTRY_CACHE_BYTES_LIMIT
+            ):
+                oldest_entry_id = next(iter(self._entry_cache))
+                self._drop_cached_entry_locked(oldest_entry_id)
+
+    def _drop_cached_entry_locked(self, entry_id: str) -> None:
+        cached = self._entry_cache.pop(entry_id, None)
+        if cached is not None:
+            self._entry_cache_bytes -= cached[2]
 
     def _get_cached_entry(self, entry_id: str) -> FreshRSSEntry | None:
         now = time.monotonic()
@@ -480,9 +1171,12 @@ class FreshRSSClient:
             if cached is None:
                 return None
             if cached[0] <= now:
-                self._entry_cache.pop(entry_id, None)
+                self._drop_cached_entry_locked(entry_id)
                 return None
-            return cached[1]
+            self._entry_cache.pop(entry_id)
+            entry = self._overlay_entry_locked(cached[1])
+            self._entry_cache[entry_id] = (cached[0], entry, cached[2])
+            return entry
 
     def _set_cached_starred(self, entry_ids: Iterable[str], is_starred: bool) -> None:
         ids = set(entry_ids)
@@ -493,6 +1187,7 @@ class FreshRSSClient:
                     self._entry_cache[entry_id] = (
                         cached[0],
                         replace(cached[1], is_starred=is_starred),
+                        cached[2],
                     )
 
     def _set_cached_entry_read(self, entry_ids: Iterable[str], is_read: bool) -> None:
@@ -506,6 +1201,7 @@ class FreshRSSClient:
                     self._entry_cache[entry_id] = (
                         cached[0],
                         replace(cached[1], is_read=is_read),
+                        cached[2],
                     )
 
     def _set_cached_read(self, entry_ids: Iterable[str], is_read: bool) -> None:
@@ -529,20 +1225,6 @@ class FreshRSSClient:
                         expires_at,
                         replace(page, entries=entries),
                     )
-            for key, snapshot in self._stream_scan_cache.items():
-                keeps_read = key[1]
-                if is_read and not keeps_read:
-                    entries = [
-                        entry for entry in snapshot.entries if entry.id not in ids
-                    ]
-                else:
-                    entries = [
-                        replace(entry, is_read=is_read)
-                        if entry.id in ids
-                        else entry
-                        for entry in snapshot.entries
-                    ]
-                snapshot.entries = entries
 
     def _set_cached_stream_starred(
         self, entry_ids: Iterable[str], is_starred: bool
@@ -561,13 +1243,6 @@ class FreshRSSClient:
                     expires_at,
                     replace(page, entries=entries),
                 )
-            for snapshot in self._stream_scan_cache.values():
-                snapshot.entries = [
-                    replace(entry, is_starred=is_starred)
-                    if entry.id in ids
-                    else entry
-                    for entry in snapshot.entries
-                ]
 
     def _clear_stream_cache(self, *, scope_kind: str | None = None) -> None:
         with self._lock:
@@ -575,7 +1250,6 @@ class FreshRSSClient:
             if scope_kind is None:
                 self._stream_cache.clear()
                 self._stream_retry_after.clear()
-                self._stream_scan_cache.clear()
                 return
             self._stream_cache = {
                 key: value
@@ -587,12 +1261,6 @@ class FreshRSSClient:
                 for key, value in self._stream_retry_after.items()
                 if key[0] != scope_kind
             }
-            if scope_kind == "starred":
-                self._stream_scan_cache = {
-                    key: value
-                    for key, value in self._stream_scan_cache.items()
-                    if key[0] != STARRED_STATE
-                }
 
     def get_group(self, slug: str) -> FreshRSSGroup | None:
         navigation = self.list_navigation()
@@ -608,224 +1276,6 @@ class FreshRSSClient:
                 return feed
         return None
 
-    def _get_group_stream(
-        self,
-        *,
-        scope_value: str | None,
-        continuation: str | None,
-        limit: int,
-        navigation: FreshRSSNavigation,
-        include_read: bool,
-    ) -> FreshRSSStreamPage:
-        if not scope_value:
-            raise FreshRSSError("Group scope requires a slug.")
-
-        group_feeds = [
-            feed for feed in navigation.feeds if scope_value in feed.group_slugs
-        ]
-        if not group_feeds:
-            raise FreshRSSError(f"Unknown FreshRSS group: {scope_value}")
-
-        offset = _decode_group_offset(continuation)
-        desired_count = offset + limit + 1
-        merged_entries: dict[str, FreshRSSEntry] = {}
-
-        for feed in group_feeds:
-            for entry in self._collect_feed_entries_for_group(
-                feed=feed,
-                desired_count=desired_count,
-                page_size=limit,
-                navigation=navigation,
-                include_read=include_read,
-            ):
-                merged_entries[entry.id] = entry
-
-        ordered_entries = sorted(
-            merged_entries.values(), key=_entry_sort_key, reverse=True
-        )
-        page_entries = ordered_entries[offset : offset + limit]
-        next_offset = offset + limit
-        next_continuation = (
-            _encode_group_offset(next_offset)
-            if len(ordered_entries) > next_offset
-            else None
-        )
-        return FreshRSSStreamPage(entries=page_entries, continuation=next_continuation)
-
-    def _get_sorted_stream(
-        self,
-        *,
-        scope_kind: str,
-        scope_value: str | None,
-        continuation: str | None,
-        limit: int,
-        navigation: FreshRSSNavigation,
-        include_read: bool,
-    ) -> FreshRSSStreamPage:
-        stream_id = self._stream_id_for_scope(scope_kind, scope_value, navigation)
-        offset = _decode_sorted_offset(continuation)
-        desired_count = offset + limit + 1
-        scan_limit = _sorted_scan_limit(desired_count)
-        entries = self._collect_entries_for_sorted_stream(
-            stream_id=stream_id,
-            scan_limit=scan_limit,
-            page_size=max(limit, 50),
-            navigation=navigation,
-            include_read=include_read,
-        )
-        page_entries = entries[offset : offset + limit]
-        next_offset = offset + limit
-        next_continuation = (
-            _encode_sorted_offset(next_offset)
-            if len(entries) > next_offset
-            else None
-        )
-        return FreshRSSStreamPage(entries=page_entries, continuation=next_continuation)
-
-    def _collect_feed_entries_for_group(
-        self,
-        *,
-        feed: FreshRSSFeed,
-        desired_count: int,
-        page_size: int,
-        navigation: FreshRSSNavigation,
-        include_read: bool,
-    ) -> list[FreshRSSEntry]:
-        scan_limit = _sorted_scan_limit(desired_count)
-        entries = self._collect_entries_for_sorted_stream(
-            stream_id=feed.stream_id,
-            scan_limit=scan_limit,
-            page_size=max(page_size, 50),
-            navigation=navigation,
-            include_read=include_read,
-        )
-        return entries[:desired_count]
-
-    def _collect_entries_for_sorted_stream(
-        self,
-        *,
-        stream_id: str,
-        scan_limit: int,
-        page_size: int,
-        navigation: FreshRSSNavigation,
-        include_read: bool,
-    ) -> list[FreshRSSEntry]:
-        with self._stream_singleflight(("scan", stream_id, None, include_read)):
-            return self._collect_entries_for_sorted_stream_snapshot(
-                stream_id=stream_id,
-                scan_limit=scan_limit,
-                page_size=page_size,
-                navigation=navigation,
-                include_read=include_read,
-            )
-
-    def _collect_entries_for_sorted_stream_snapshot(
-        self,
-        *,
-        stream_id: str,
-        scan_limit: int,
-        page_size: int,
-        navigation: FreshRSSNavigation,
-        include_read: bool,
-    ) -> list[FreshRSSEntry]:
-        now = time.monotonic()
-        cache_key = (stream_id, include_read)
-        cache_generation = 0
-        expires_at = now + self.settings.stream_cache_seconds
-        entries: list[FreshRSSEntry] = []
-        continuation: str | None = None
-        complete = False
-
-        if self.settings.stream_cache_seconds > 0:
-            with self._lock:
-                cache_generation = self._stream_cache_generation
-                cached = self._stream_scan_cache.get(cache_key)
-                if cached is not None and cached.expires_at > now:
-                    entries = list(cached.entries)
-                    continuation = cached.continuation
-                    complete = cached.complete
-                    expires_at = cached.expires_at
-                elif cached is not None:
-                    self._stream_scan_cache.pop(cache_key, None)
-
-        seen_ids = {entry.id for entry in entries}
-        seen_continuations = {continuation} if continuation else set()
-        discovered_entries: list[FreshRSSEntry] = []
-        changed = False
-
-        while len(entries) + len(discovered_entries) < scan_limit and not complete:
-            page = self._fetch_stream_page(
-                stream_id=stream_id,
-                navigation=navigation,
-                continuation=continuation,
-                limit=page_size,
-                exclude_read=not include_read,
-            )
-            if not page.entries:
-                complete = True
-                changed = True
-                break
-            for entry in page.entries:
-                if entry.id in seen_ids:
-                    continue
-                seen_ids.add(entry.id)
-                discovered_entries.append(entry)
-                changed = True
-            next_continuation = page.continuation
-            if (
-                not next_continuation
-                or next_continuation == continuation
-                or next_continuation in seen_continuations
-            ):
-                continuation = next_continuation
-                complete = True
-                changed = True
-                break
-            continuation = next_continuation
-            seen_continuations.add(continuation)
-            changed = True
-
-        if discovered_entries:
-            discovered_entries.sort(key=_entry_sort_key, reverse=True)
-            entries.extend(discovered_entries)
-
-        if self.settings.stream_cache_seconds > 0 and changed:
-            with self._lock:
-                now = time.monotonic()
-                self._stream_scan_cache = {
-                    key: value
-                    for key, value in self._stream_scan_cache.items()
-                    if value.expires_at > now
-                }
-                if cache_generation == self._stream_cache_generation:
-                    self._stream_scan_cache.pop(cache_key, None)
-                    if len(entries) <= STREAM_SCAN_CACHE_ENTRY_BUDGET:
-                        retained_entries = sum(
-                            len(snapshot.entries)
-                            for snapshot in self._stream_scan_cache.values()
-                        )
-                        while (
-                            self._stream_scan_cache
-                            and retained_entries + len(entries)
-                            > STREAM_SCAN_CACHE_ENTRY_BUDGET
-                        ):
-                            oldest_key = min(
-                                self._stream_scan_cache,
-                                key=lambda key: self._stream_scan_cache[
-                                    key
-                                ].expires_at,
-                            )
-                            evicted = self._stream_scan_cache.pop(oldest_key)
-                            retained_entries -= len(evicted.entries)
-                        self._stream_scan_cache[cache_key] = _StreamScanSnapshot(
-                            expires_at=expires_at,
-                            entries=entries,
-                            continuation=continuation,
-                            complete=complete,
-                        )
-
-        return entries[:scan_limit]
-
     def _stream_id_for_scope(
         self,
         scope_kind: str,
@@ -836,6 +1286,13 @@ class FreshRSSClient:
             return READING_LIST_STREAM
         if scope_kind == "starred":
             return STARRED_STATE
+        if scope_kind == "group":
+            if not scope_value:
+                raise FreshRSSError("Group scope requires a slug.")
+            for group in navigation.groups:
+                if group.slug == scope_value:
+                    return group.stream_id
+            raise FreshRSSError(f"Unknown FreshRSS group: {scope_value}")
         if scope_kind == "feed":
             if not scope_value:
                 raise FreshRSSError("Feed scope requires a token.")
@@ -1000,7 +1457,14 @@ class FreshRSSClient:
             f"/reader/api/0/stream/contents/{quote(stream_id, safe='')}",
             params=params,
         )
-        return self._parse_stream_page(payload, navigation)
+        page = self._parse_stream_page(payload, navigation)
+        if page.continuation and page.entries:
+            self._remember_cursor_anchor(
+                stream_id,
+                page.continuation,
+                page.entries[-1].id,
+            )
+        return page
 
     def _parse_stream_page(
         self, payload: dict[str, Any], navigation: FreshRSSNavigation
@@ -1176,39 +1640,281 @@ def _normalize_feed_stream_id(value: str) -> str:
     return f"feed/{candidate}"
 
 
-def _entry_sort_key(entry: FreshRSSEntry) -> tuple[str, str]:
-    return (entry.published_at or "", entry.id)
+def _compact_overlay_entry_id(entry_id: str) -> str | int:
+    prefix = "tag:google.com,2005:reader/item/"
+    suffix = entry_id.removeprefix(prefix)
+    if entry_id.startswith(prefix) and len(suffix) == 16:
+        try:
+            return int(suffix, 16)
+        except ValueError:
+            pass
+    return entry_id
 
 
-def _encode_group_offset(offset: int) -> str:
-    return f"{GROUP_CONTINUATION_PREFIX}{max(offset, 0)}"
+def _restore_overlay_entry_id(value: object) -> str | None:
+    if isinstance(value, str):
+        return value if 0 < len(value) <= 512 else None
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 0xFFFFFFFFFFFFFFFF
+    ):
+        return f"tag:google.com,2005:reader/item/{value:016x}"
+    return None
 
 
-def _decode_group_offset(value: str | None) -> int:
-    if not value:
-        return 0
-    if not value.startswith(GROUP_CONTINUATION_PREFIX):
-        raise FreshRSSError(f"Invalid group continuation token: {value}")
+def _compact_overlay_entry_ids(entry_ids: tuple[str, ...]) -> object:
+    values = [_compact_overlay_entry_id(entry_id) for entry_id in entry_ids]
+    if values and all(isinstance(value, int) for value in values):
+        numeric_values = [int(value) for value in values]
+        return {
+            "d": [
+                numeric_values[0],
+                *[
+                    current - previous
+                    for previous, current in zip(
+                        numeric_values,
+                        numeric_values[1:],
+                    )
+                ],
+            ]
+        }
+    return values
+
+
+def _restore_overlay_entry_ids(value: object) -> list[str] | None:
+    raw_values: object = value
+    if isinstance(value, dict):
+        deltas = value.get("d")
+        if (
+            set(value) != {"d"}
+            or not isinstance(deltas, list)
+            or not deltas
+            or len(deltas) > OVERLAY_CONTINUATION_MAX_ITEMS
+            or not all(
+                isinstance(delta, int) and not isinstance(delta, bool)
+                for delta in deltas
+            )
+        ):
+            return None
+        numeric_values = [deltas[0]]
+        for delta in deltas[1:]:
+            numeric_values.append(numeric_values[-1] + delta)
+        if not all(0 <= numeric_id <= 0xFFFFFFFFFFFFFFFF for numeric_id in numeric_values):
+            return None
+        raw_values = numeric_values
+    if (
+        not isinstance(raw_values, list)
+        or len(raw_values) > OVERLAY_CONTINUATION_MAX_ITEMS
+    ):
+        return None
+    restored = [_restore_overlay_entry_id(entry_id) for entry_id in raw_values]
+    if any(entry_id is None for entry_id in restored):
+        return None
+    return [entry_id for entry_id in restored if entry_id is not None]
+
+
+def _encode_overlay_continuation(state: _OverlayContinuation) -> str | None:
+    carried_entry_ids = tuple(dict.fromkeys(state.carried_entry_ids))
+    shown_entry_ids = tuple(dict.fromkeys(state.shown_entry_ids))
+    if state.upstream is None and not carried_entry_ids:
+        return None
+    if not carried_entry_ids and not shown_entry_ids:
+        return state.upstream
+    if (
+        len(carried_entry_ids) > OVERLAY_CONTINUATION_MAX_ITEMS
+        or len(shown_entry_ids) > OVERLAY_CONTINUATION_MAX_ITEMS
+    ):
+        raise FreshRSSError("Local stream continuation is too large.")
+    payload = {
+        "k": state.scope_kind,
+        "v": state.scope_value,
+        "c": state.upstream,
+        "p": _compact_overlay_entry_ids(carried_entry_ids),
+        "s": _compact_overlay_entry_ids(shown_entry_ids),
+    }
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode()
+    if len(raw) > OVERLAY_CONTINUATION_MAX_BYTES:
+        raise FreshRSSError("Local stream continuation is too large.")
+    packed = zlib.compress(raw, level=9)
+    encoded = base64.urlsafe_b64encode(packed).decode("ascii").rstrip("=")
+    return f"{OVERLAY_CONTINUATION_PREFIX}{encoded}"
+
+
+def _decode_overlay_continuation(value: str | None) -> _OverlayContinuation | None:
+    if not value or not value.startswith(OVERLAY_CONTINUATION_PREFIX):
+        return None
+    encoded = value.removeprefix(OVERLAY_CONTINUATION_PREFIX)
+    if not encoded or len(encoded) > OVERLAY_CONTINUATION_MAX_BYTES * 2:
+        return None
+    padding = "=" * ((4 - len(encoded) % 4) % 4)
     try:
-        return max(int(value.removeprefix(GROUP_CONTINUATION_PREFIX)), 0)
-    except ValueError as exc:
-        raise FreshRSSError(f"Invalid group continuation token: {value}") from exc
+        packed = base64.b64decode(
+            encoded + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        decompressor = zlib.decompressobj()
+        raw = decompressor.decompress(packed, OVERLAY_CONTINUATION_MAX_BYTES + 1)
+        if (
+            len(raw) > OVERLAY_CONTINUATION_MAX_BYTES
+            or decompressor.unconsumed_tail
+            or not decompressor.eof
+        ):
+            return None
+        payload = json.loads(raw.decode("ascii"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, zlib.error):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    scope_kind = payload.get("k")
+    scope_value = payload.get("v")
+    upstream = payload.get("c")
+    carried = payload.get("p")
+    shown = payload.get("s")
+    if not isinstance(scope_kind, str) or not scope_kind:
+        return None
+    if scope_value is not None and not isinstance(scope_value, str):
+        return None
+    if upstream is not None and not isinstance(upstream, str):
+        return None
+    restored_carried = _restore_overlay_entry_ids(carried)
+    restored_shown = _restore_overlay_entry_ids(shown)
+    if restored_carried is None or restored_shown is None:
+        return None
+    return _OverlayContinuation(
+        scope_kind=scope_kind,
+        scope_value=scope_value,
+        upstream=upstream,
+        carried_entry_ids=tuple(
+            dict.fromkeys(
+                entry_id for entry_id in restored_carried
+            )
+        ),
+        shown_entry_ids=tuple(
+            dict.fromkeys(
+                entry_id for entry_id in restored_shown
+            )
+        ),
+    )
 
 
-def _encode_sorted_offset(offset: int) -> str:
-    return f"{SORTED_CONTINUATION_PREFIX}{max(offset, 0)}"
+def compact_overlay_continuation_for_history(
+    value: str,
+) -> str | list[object]:
+    state = _decode_overlay_continuation(value)
+    if state is None:
+        return value
+    return [
+        "rk1",
+        state.scope_kind,
+        state.scope_value,
+        state.upstream,
+        list(state.carried_entry_ids),
+        list(state.shown_entry_ids),
+    ]
 
 
-def _decode_sorted_offset(value: str | None) -> int:
-    if not value:
-        return 0
-    if not value.startswith(SORTED_CONTINUATION_PREFIX):
-        raise FreshRSSError(f"Invalid sorted continuation token: {value}")
+def restore_overlay_continuation_from_history(value: object) -> str | None:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list) or len(value) != 6 or value[0] != "rk1":
+        return None
+    _, scope_kind, scope_value, upstream, carried, shown = value
+    if not isinstance(scope_kind, str) or not scope_kind:
+        return None
+    if scope_value is not None and not isinstance(scope_value, str):
+        return None
+    if upstream is not None and not isinstance(upstream, str):
+        return None
+    if not isinstance(carried, list) or not isinstance(shown, list):
+        return None
+    if (
+        len(carried) > OVERLAY_CONTINUATION_MAX_ITEMS
+        or len(shown) > OVERLAY_CONTINUATION_MAX_ITEMS
+    ):
+        return None
+    restored_carried = [_restore_overlay_entry_id(entry_id) for entry_id in carried]
+    restored_shown = [_restore_overlay_entry_id(entry_id) for entry_id in shown]
+    if any(entry_id is None for entry_id in [*restored_carried, *restored_shown]):
+        return None
     try:
-        return max(int(value.removeprefix(SORTED_CONTINUATION_PREFIX)), 0)
-    except ValueError as exc:
-        raise FreshRSSError(f"Invalid sorted continuation token: {value}") from exc
+        return _encode_overlay_continuation(
+            _OverlayContinuation(
+                scope_kind=scope_kind,
+                scope_value=scope_value,
+                upstream=upstream,
+                carried_entry_ids=tuple(
+                    entry_id
+                    for entry_id in restored_carried
+                    if entry_id is not None
+                ),
+                shown_entry_ids=tuple(
+                    entry_id
+                    for entry_id in restored_shown
+                    if entry_id is not None
+                ),
+            )
+        )
+    except FreshRSSError:
+        return None
 
 
-def _sorted_scan_limit(desired_count: int) -> int:
-    return min(max(desired_count * 3, 50), 1000)
+def _entry_id_from_continuation(continuation: str) -> str | None:
+    try:
+        numeric_id = int(continuation)
+    except (TypeError, ValueError):
+        return None
+    if numeric_id < 0:
+        return None
+    return f"tag:google.com,2005:reader/item/{numeric_id:016x}"
+
+
+def _continuation_from_entry_id(entry_id: str) -> str | None:
+    prefix = "tag:google.com,2005:reader/item/"
+    if not entry_id.startswith(prefix):
+        return None
+    try:
+        return str(int(entry_id.removeprefix(prefix), 16))
+    except ValueError:
+        return None
+
+
+def _entry_can_follow_continuation(
+    entry_id: str,
+    continuation: str | None,
+) -> bool:
+    if continuation is None:
+        return False
+    entry_cursor = _continuation_from_entry_id(entry_id)
+    if entry_cursor is None or not continuation.isdigit():
+        return True
+    return int(entry_cursor) < int(continuation)
+
+
+def _entry_cache_size(entry: FreshRSSEntry) -> int:
+    text_values = (
+        entry.id,
+        entry.title,
+        entry.author,
+        entry.url,
+        entry.published_at,
+        entry.summary_html,
+        entry.summary_text,
+        entry.content_html,
+        entry.feed_title,
+        entry.feed_site_url,
+        entry.feed_token,
+        entry.received_at,
+        *entry.group_names,
+    )
+    return sum(len(value) for value in text_values if value is not None)
+
+
+def _stream_cache_entry(entry: FreshRSSEntry) -> FreshRSSEntry:
+    return replace(
+        entry,
+        summary_html=(entry.summary_html or "")[:STREAM_CACHE_HTML_CHARS] or None,
+        summary_text=entry.summary_text[:STREAM_CACHE_TEXT_CHARS],
+        content_html=(entry.content_html or "")[:STREAM_CACHE_HTML_CHARS] or None,
+    )
