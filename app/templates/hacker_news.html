@@ -9,17 +9,16 @@
 
 <article class="article-view hn-discussion-view">
   <header class="hn-story-header">
-    <p class="hn-kicker">Hacker News discussion</p>
     <h1 class="hn-story-title">{{ discussion.title }}</h1>
     <div class="item-meta item-meta-inline hn-story-meta">
       <span class="item-source">{{ discussion.author }}</span>
       {% if discussion.created_at %}
       <span class="meta-sep" aria-hidden="true">·</span>
-      <time datetime="{{ discussion.created_at }}">{{ discussion.created_at|format_relative_time }}</time>
+      <time datetime="{{ discussion.created_at }}" title="{{ discussion.created_at|format_datetime }}">{{ discussion.created_at|format_compact_relative_time }}</time>
       {% endif %}
       {% if discussion.score is not none %}
       <span class="meta-sep" aria-hidden="true">·</span>
-      <span>{{ discussion.score }} points</span>
+      <span>{{ discussion.score }} pts</span>
       {% endif %}
       <span class="meta-sep" aria-hidden="true">·</span>
       <span>{{ discussion.comment_count }} comments</span>
@@ -43,7 +42,7 @@
   </header>
 
   <section class="hn-comments" aria-labelledby="hn-comments-heading">
-    <h2 id="hn-comments-heading">Comments</h2>
+    <h2 class="visually-hidden" id="hn-comments-heading">Comments</h2>
     {% if discussion.comments %}
       {% for comment in discussion.comments %}
       <article class="hn-comment hn-comment-depth-{{ comment.visual_depth }}{% if comment.is_deleted or comment.is_dead %} hn-comment-muted{% endif %}" id="comment-{{ comment.id }}">
@@ -51,22 +50,18 @@
           <h3>
             <span class="hn-comment-author">{{ comment.author }}</span>
             {% if comment.created_at %}
-            <time datetime="{{ comment.created_at }}">{{ comment.created_at|format_relative_time }}</time>
+            <span class="hn-comment-separator" aria-hidden="true">·</span>
+            <time datetime="{{ comment.created_at }}" title="{{ comment.created_at|format_datetime }}">{{ comment.created_at|format_compact_relative_time }}</time>
             {% endif %}
             {% if comment.parent_author %}
-            <span class="hn-comment-context">Reply to {{ comment.parent_author }} · level {{ comment.depth + 1 }}</span>
-            {% else %}
-            <span class="hn-comment-context">Top-level comment</span>
+            <span class="hn-comment-separator" aria-hidden="true">·</span>
+            <span class="hn-comment-context">to {{ comment.parent_author }}</span>
             {% endif %}
           </h3>
         </header>
         <div class="article-body hn-comment-body">
           {{ comment.html | safe }}
         </div>
-        <footer class="hn-comment-footer">
-          {% if comment.reply_count %}<span>{{ comment.reply_count }} {% if comment.reply_count == 1 %}reply{% else %}replies{% endif %}</span><span class="meta-sep" aria-hidden="true">·</span>{% endif %}
-          <a href="{{ comment.permalink }}" rel="noreferrer">View on HN</a>
-        </footer>
       </article>
       {% endfor %}
     {% else %}

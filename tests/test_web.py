@@ -1332,8 +1332,6 @@ def test_hacker_news_discussion_renders_thread_for_kindle(tmp_path: Path):
                 depth=0,
                 visual_depth=0,
                 parent_author=None,
-                reply_count=1,
-                permalink="https://news.ycombinator.com/item?id=10",
                 is_deleted=False,
                 is_dead=False,
             ),
@@ -1345,8 +1343,6 @@ def test_hacker_news_discussion_renders_thread_for_kindle(tmp_path: Path):
                 depth=1,
                 visual_depth=1,
                 parent_author="alice",
-                reply_count=0,
-                permalink="https://news.ycombinator.com/item?id=11",
                 is_deleted=False,
                 is_dead=False,
             ),
@@ -1368,9 +1364,10 @@ def test_hacker_news_discussion_renders_thread_for_kindle(tmp_path: Path):
     assert response.headers["cache-control"] == "private, no-cache"
     soup = BeautifulSoup(response.text, "html.parser")
     assert soup.select_one("body.hacker-news-page") is not None
+    assert soup.select_one(".hn-kicker") is None
     assert soup.select_one(".hn-story-title").get_text(strip=True) == discussion.title
     assert "submitter" in soup.select_one(".hn-story-meta").get_text(" ", strip=True)
-    assert "314 points" in soup.select_one(".hn-story-meta").get_text(" ", strip=True)
+    assert "314 pts" in soup.select_one(".hn-story-meta").get_text(" ", strip=True)
     assert "github.com" in soup.select_one(".hn-story-meta").get_text(" ", strip=True)
     assert [
         author.get_text(strip=True)
@@ -1380,15 +1377,21 @@ def test_hacker_news_discussion_renders_thread_for_kindle(tmp_path: Path):
         "bob",
     ]
     assert soup.select_one(".hn-comment-depth-1") is not None
-    assert "Reply to alice · level 2" in soup.select_one(
+    assert soup.select_one("#hn-comments-heading.visually-hidden") is not None
+    assert "to alice" == soup.select_one(
         ".hn-comment-depth-1 .hn-comment-context"
     ).get_text(" ", strip=True)
-    assert "Top-level comment" in soup.select_one(
-        ".hn-comment-depth-0 .hn-comment-context"
-    ).get_text(" ", strip=True)
+    assert soup.select_one(".hn-comment-depth-0 .hn-comment-context") is None
+    comment_time = soup.select_one(".hn-comment-depth-0 time")
+    assert comment_time.get("datetime") == "2026-03-29T10:22:00+00:00"
+    assert comment_time.get("title") == "2026-03-29 10:22 UTC"
+    assert len(comment_time.get_text(strip=True)) <= 6
+    assert "ago" not in comment_time.get_text(strip=True)
     assert "Top-level comment" in soup.select_one(
         ".hn-comment-body"
     ).get_text(" ", strip=True)
+    assert soup.select_one(".hn-comment-footer") is None
+    assert "View on HN" not in soup.get_text(" ", strip=True)
     assert soup.select_one(".hn-thread-note") is not None
     assert soup.select_one("[data-close-article]").get("href") == "/starred"
     controls = soup.select_one('[data-page-mode="article"]')

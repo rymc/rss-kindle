@@ -3,30 +3,19 @@
 }
 
 .hn-story-header {
-  margin-bottom: 1rem;
-  padding-bottom: 0.9rem;
-  border-bottom: 2px solid #315f70;
-}
-
-.hn-kicker {
-  margin: 0 0 0.2rem;
-  color: #315f70;
-  font-family: "Amazon Ember", Arial, Helvetica, sans-serif;
-  font-size: 0.78rem;
-  font-weight: bold;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  margin-bottom: 0.35rem;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid #315f70;
 }
 
 .hn-story-title {
-  margin: 0 0 0.35rem;
-  font-size: 1.45rem;
-  line-height: 1.25;
+  margin: 0 0 0.2rem;
+  font-size: 1.3rem;
+  line-height: 1.2;
 }
 
 .hn-story-meta,
 .hn-comment-header,
-.hn-comment-footer,
 .hn-thread-note {
   font-family: "Amazon Ember", Arial, Helvetica, sans-serif;
 }
@@ -34,28 +23,36 @@
 .hn-story-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.45rem;
-  margin-top: 0.75rem;
+  gap: 0;
+  margin-top: 0.4rem;
+}
+
+.hn-story-actions .button-link + .button-link {
+  margin-left: 0.4rem;
+}
+
+.hn-story-meta .meta-sep {
+  margin-right: 0.25em;
+  margin-left: 0.25em;
+}
+
+.hn-story-meta {
+  gap: 0;
 }
 
 .hn-thread-note {
-  margin: 0.75rem 0 0;
-  padding: 0.55rem;
+  margin: 0.4rem 0 0;
+  padding: 0.35rem;
   border-left: 3px solid #65777e;
   background: #f1f4f5;
   font-size: 0.85rem;
   line-height: 1.4;
 }
 
-.hn-comments > h2 {
-  margin: 0 0 0.65rem;
-  font-size: 1.25rem;
-}
-
 .hn-comment {
   box-sizing: border-box;
-  margin: 0 0 0.75rem;
-  padding: 0.65rem 0.7rem;
+  margin: 0 0 0.35rem;
+  padding: 0.2rem 0.4rem 0.3rem;
   border: 0;
   border-left: 3px solid #315f70;
   background: #fff;
@@ -84,18 +81,14 @@
 }
 
 .hn-comment-header {
-  padding-bottom: 0.35rem;
-  border-bottom: 1px solid #c4cccf;
+  padding: 0;
+  border: 0;
 }
 
 .hn-comment-header h3 {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.2rem 0.45rem;
   margin: 0;
-  font-size: 1rem;
+  font-size: 0.9rem;
   line-height: 1.25;
-  align-items: baseline;
 }
 
 .hn-comment-author {
@@ -108,24 +101,17 @@
   font-size: 0.78rem;
 }
 
-.hn-comment-context {
-  flex-basis: 100%;
+.hn-comment-separator {
+  margin-right: 0.25em;
+  margin-left: 0.25em;
+  color: #657277;
 }
 
 .hn-comment-body {
   font-size: 1.04rem;
-  line-height: 1.55;
+  line-height: 1.42;
 }
 
 .hn-comment-body p {
-  margin: 0.55rem 0;
-}
-
-.hn-comment-footer {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.2rem;
-  padding-top: 0.35rem;
-  border-top: 1px solid #d2d7d9;
-  font-size: 0.78rem;
+  margin: 0.2rem 0;
 }

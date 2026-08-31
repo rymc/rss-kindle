@@ -206,6 +206,14 @@ def test_article_pages_show_complete_non_repeated_lines_with_book_rules(
                       (line) => pages[index - 1].ids.includes(line)
                     ).length;
                   }
+                  const articleBody = article.querySelector('.article-body');
+                  const articleParagraphs = articleBody.querySelectorAll('p');
+                  const bodyStyle = getComputedStyle(articleBody);
+                  const paragraphStyle = getComputedStyle(articleParagraphs[0]);
+                  const indentedStyle = getComputedStyle(articleParagraphs[1]);
+                  const sectionHeadingStyle = getComputedStyle(
+                    article.querySelector('.article-body h2')
+                  );
                   return {
                     pageCount,
                     maskBlocksPointer,
@@ -217,7 +225,16 @@ def test_article_pages_show_complete_non_repeated_lines_with_book_rules(
                     maximumTopMask: Math.max(
                       ...pages.map((current) => current.topMaskHeight)
                     ),
-                    finalPageFirstLine: pages.at(-1).firstVisibleTop
+                    finalPageFirstLine: pages.at(-1).firstVisibleTop,
+                    typography: {
+                      textAlign: bodyStyle.textAlign,
+                      hyphens: bodyStyle.hyphens || bodyStyle.webkitHyphens,
+                      lineHeightRatio: parseFloat(bodyStyle.lineHeight)
+                        / parseFloat(bodyStyle.fontSize),
+                      paragraphMargin: parseFloat(paragraphStyle.marginBottom),
+                      paragraphIndent: parseFloat(indentedStyle.textIndent),
+                      sectionHeadingAlign: sectionHeadingStyle.textAlign
+                    }
                   };
                 }"""
             )
@@ -240,3 +257,9 @@ def test_article_pages_show_complete_non_repeated_lines_with_book_rules(
     assert result["maximumTopMask"] <= 10
     assert result["finalPageFirstLine"] <= 12
     assert result["keptFinalPageAfterResize"] is True
+    assert result["typography"]["textAlign"] == "justify"
+    assert result["typography"]["hyphens"] == "auto"
+    assert result["typography"]["lineHeightRatio"] <= 1.5
+    assert result["typography"]["paragraphMargin"] == 0
+    assert result["typography"]["paragraphIndent"] > 0
+    assert result["typography"]["sectionHeadingAlign"] == "left"
