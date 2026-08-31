@@ -579,19 +579,15 @@ button,
 }
 
 body.article-page:not(.hacker-news-page) .article-body {
-  line-height: 1.45;
-  text-align: justify;
-  -webkit-hyphens: auto;
-  hyphens: auto;
+  line-height: 1.58;
+  text-align: left;
+  -webkit-hyphens: none;
+  hyphens: none;
 }
 
 body.article-page:not(.hacker-news-page) .article-body p {
   margin-top: 0;
-  margin-bottom: 0;
-}
-
-body.article-page:not(.hacker-news-page) .article-body p + p {
-  text-indent: 1.2em;
+  margin-bottom: 0.7em;
 }
 
 body.article-page:not(.hacker-news-page) .article-body h1,
@@ -608,13 +604,6 @@ body.article-page:not(.hacker-news-page) .article-body ol {
   text-align: left;
   -webkit-hyphens: none;
   hyphens: none;
-}
-
-body.article-page:not(.hacker-news-page) .article-body blockquote p,
-body.article-page:not(.hacker-news-page) .article-body li p,
-body.article-page:not(.hacker-news-page) .article-body td p,
-body.article-page:not(.hacker-news-page) .article-body th p {
-  text-indent: 0;
 }
 
 body.article-page:not(.hacker-news-page) .article-body blockquote p {
