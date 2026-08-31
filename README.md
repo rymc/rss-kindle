@@ -4,11 +4,6 @@ A small, fast FreshRSS frontend built for Kindle browsers.
 
 FreshRSS still handles subscriptions, polling, unread state, and stars. RSS Kindle provides a simpler reading screen, extracts cleaner article text, and caches it locally. It is designed for one FreshRSS account rather than as a public, multi-user service.
 
-<p align="center">
-  <img src="docs/images/kindle-unread-queue.jpg" alt="Unread queue on a Kindle" width="280" />
-  <img src="docs/images/kindle-article-view.jpg" alt="Article view on a Kindle" width="280" />
-</p>
-
 ## Highlights
 
 - Three-card pages and large side controls instead of unreliable Kindle scrolling

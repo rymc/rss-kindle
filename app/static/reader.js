@@ -19,6 +19,15 @@
   var pageViewport = 0;
   var pageMaximum = 0;
   var pageStep = 240;
+  var articleView = !streamControls && doc.querySelector(".article-view");
+  var articlePages = [];
+  var articlePageIndex = 0;
+  var articlePaginationReady = false;
+  var articleTopMask = null;
+  var articleBottomMask = null;
+  var articleLineTolerance = 2;
+  var articlePageTopGutter = 10;
+  var articlePageBottomGutter = 10;
   var streamList = streamControls && doc.querySelector("[data-paged-stream]");
   var streamStatus = streamControls && doc.querySelector("[data-stream-page-status]");
   var streamCards = streamList ? streamList.querySelectorAll("[data-entry-card]") : [];
@@ -280,6 +289,290 @@
     return Math.min(viewport - 240, controls.offsetHeight + 24);
   }
 
+  function currentScrollPosition() {
+    return window.pageYOffset || root.scrollTop || 0;
+  }
+
+  function articleBlockKind(element) {
+    var tagName = element && element.tagName ? element.tagName.toLowerCase() : "";
+    if (/^h[1-6]$/.test(tagName)) return "heading";
+    if (tagName === "p" || tagName === "li" || tagName === "blockquote"
+        || tagName === "pre" || tagName === "dt" || tagName === "dd"
+        || tagName === "figcaption" || tagName === "td" || tagName === "th") {
+      return "paragraph";
+    }
+    return "other";
+  }
+
+  function articleBlockFor(node) {
+    var element = node && node.parentNode;
+    var fallback = element;
+    while (element && element !== articleView) {
+      if (articleBlockKind(element) !== "other") return element;
+      element = element.parentNode;
+    }
+    return fallback;
+  }
+
+  function articleLineGroup(groups, element) {
+    var index;
+    for (index = 0; index < groups.length; index += 1) {
+      if (groups[index].element === element) return groups[index];
+    }
+    var group = {
+      element: element,
+      kind: articleBlockKind(element),
+      order: groups.length,
+      rects: [],
+      first: -1,
+      last: -1
+    };
+    groups.push(group);
+    return group;
+  }
+
+  function collectArticleTextRects(node, groups, scrollPosition) {
+    if (!node) return;
+    if (node.nodeType === 3) {
+      if (!/\S/.test(node.nodeValue || "")) return;
+      var range;
+      var rects;
+      var index;
+      try {
+        range = doc.createRange();
+        range.selectNodeContents(node);
+        rects = range.getClientRects();
+      } catch (error) {
+        return;
+      }
+      var group = articleLineGroup(groups, articleBlockFor(node));
+      for (index = 0; index < rects.length; index += 1) {
+        if (rects[index].height <= 0 || rects[index].width <= 0) continue;
+        group.rects.push({
+          top: rects[index].top + scrollPosition,
+          bottom: rects[index].bottom + scrollPosition,
+          left: rects[index].left
+        });
+      }
+      if (range.detach) range.detach();
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    var child = node.firstChild;
+    while (child) {
+      collectArticleTextRects(child, groups, scrollPosition);
+      child = child.nextSibling;
+    }
+  }
+
+  function collectArticleLines() {
+    if (!articleView || !doc.createRange) return [];
+    var groups = [];
+    var lines = [];
+    var scrollPosition = currentScrollPosition();
+    collectArticleTextRects(articleView, groups, scrollPosition);
+    var groupIndex;
+    var rectIndex;
+    for (groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+      var group = groups[groupIndex];
+      group.rects.sort(function (first, second) {
+        if (Math.abs(first.top - second.top) <= articleLineTolerance) {
+          return first.left - second.left;
+        }
+        return first.top - second.top;
+      });
+      var groupLines = [];
+      for (rectIndex = 0; rectIndex < group.rects.length; rectIndex += 1) {
+        var rect = group.rects[rectIndex];
+        var line = groupLines.length ? groupLines[groupLines.length - 1] : null;
+        if (line && Math.abs(line.top - rect.top) <= articleLineTolerance) {
+          line.top = Math.min(line.top, rect.top);
+          line.bottom = Math.max(line.bottom, rect.bottom);
+        } else {
+          groupLines.push({top: rect.top, bottom: rect.bottom, group: group});
+        }
+      }
+      for (rectIndex = 0; rectIndex < groupLines.length; rectIndex += 1) {
+        lines.push(groupLines[rectIndex]);
+      }
+    }
+    lines.sort(function (first, second) {
+      if (Math.abs(first.top - second.top) <= articleLineTolerance) {
+        return first.group.order - second.group.order;
+      }
+      return first.top - second.top;
+    });
+    for (rectIndex = 0; rectIndex < lines.length; rectIndex += 1) {
+      var lineGroup = lines[rectIndex].group;
+      if (lineGroup.first < 0) lineGroup.first = rectIndex;
+      lineGroup.last = rectIndex;
+    }
+    return lines;
+  }
+
+  function adjustedArticlePageEnd(lines, firstLine, lastLine) {
+    var guard = 0;
+    var changed = true;
+    while (changed && lastLine >= firstLine && guard < 12) {
+      changed = false;
+      guard += 1;
+      var group = lines[lastLine].group;
+      var groupStartsOnPage = group.first >= firstLine;
+      var visibleGroupLines = lastLine - Math.max(firstLine, group.first) + 1;
+      var remainingGroupLines = group.last - lastLine;
+
+      // Keep a heading with at least one line of the text that follows it.
+      if (group.kind === "heading" && groupStartsOnPage && group.first > firstLine
+          && (remainingGroupLines > 0 || lastLine + 1 < lines.length)) {
+        lastLine = group.first - 1;
+        changed = true;
+        continue;
+      }
+
+      if (group.kind === "paragraph" && remainingGroupLines > 0) {
+        // Do not leave one opening line at the foot of a page.
+        if (visibleGroupLines === 1 && groupStartsOnPage && group.first > firstLine) {
+          lastLine = group.first - 1;
+          changed = true;
+          continue;
+        }
+        // Do not leave one closing line by itself on the next page.
+        if (remainingGroupLines === 1 && visibleGroupLines > 1) {
+          lastLine -= 1;
+          changed = true;
+        }
+      }
+    }
+    return Math.max(firstLine, lastLine);
+  }
+
+  function buildArticlePages() {
+    articlePages = [];
+    articlePaginationReady = false;
+    root.removeAttribute("data-article-page-count");
+    root.removeAttribute("data-article-page-index");
+    if (!articleView || !doc.createRange || pageMaximum <= 24) {
+      hideArticlePageMasks();
+      return;
+    }
+    var lines = collectArticleLines();
+    if (lines.length < 2) {
+      hideArticlePageMasks();
+      return;
+    }
+    var firstLine = 0;
+    var pageGuard = 0;
+    while (firstLine < lines.length && pageGuard <= lines.length) {
+      pageGuard += 1;
+      var requestedOffset = firstLine === 0
+        ? 0
+        : Math.floor(lines[firstLine].top - articlePageTopGutter);
+      var offset = Math.max(0, Math.min(pageMaximum, requestedOffset));
+      var pageBottom = offset + pageViewport - articlePageBottomGutter;
+      var lastLine = firstLine - 1;
+      var lineIndex;
+      for (lineIndex = firstLine; lineIndex < lines.length; lineIndex += 1) {
+        if (lines[lineIndex].bottom > pageBottom) break;
+        lastLine = lineIndex;
+      }
+      // A large line or unusual block must not stop pagination.
+      if (lastLine < firstLine) lastLine = firstLine;
+      lastLine = adjustedArticlePageEnd(lines, firstLine, lastLine);
+      var hasNextPage = lastLine + 1 < lines.length;
+      var visibleTop = lines[firstLine].top - offset;
+      var visibleBottom = lines[lastLine].bottom - offset;
+      articlePages.push({
+        offset: offset,
+        firstLine: firstLine,
+        lastLine: lastLine,
+        topMask: firstLine > 0 ? Math.max(0, Math.floor(visibleTop) - 1) : 0,
+        bottomMask: hasNextPage
+          ? Math.max(articlePageBottomGutter, pageViewport - Math.ceil(visibleBottom) - 1)
+          : 0
+      });
+      firstLine = lastLine + 1;
+    }
+    articlePaginationReady = articlePages.length > 1 && firstLine >= lines.length;
+    if (!articlePaginationReady) {
+      articlePages = [];
+      hideArticlePageMasks();
+      return;
+    }
+    articlePageIndex = nearestArticlePageIndex(currentScrollPosition());
+    showArticlePage(articlePageIndex, true);
+  }
+
+  function ensureArticlePageMasks() {
+    if (articleTopMask && articleBottomMask) return;
+    articleTopMask = doc.createElement("div");
+    articleTopMask.className = "article-page-mask article-page-mask-top";
+    articleTopMask.setAttribute("aria-hidden", "true");
+    articleBottomMask = doc.createElement("div");
+    articleBottomMask.className = "article-page-mask article-page-mask-bottom";
+    articleBottomMask.setAttribute("aria-hidden", "true");
+    setHidden(articleTopMask, true);
+    setHidden(articleBottomMask, true);
+    doc.body.appendChild(articleTopMask);
+    doc.body.appendChild(articleBottomMask);
+  }
+
+  function setArticlePageMask(mask, height) {
+    if (!mask) return;
+    if (height < 2) {
+      setHidden(mask, true);
+      return;
+    }
+    mask.style.height = Math.ceil(height) + "px";
+    setHidden(mask, false);
+  }
+
+  function hideArticlePageMasks() {
+    setHidden(articleTopMask, true);
+    setHidden(articleBottomMask, true);
+  }
+
+  function nearestArticlePageIndex(scrollPosition) {
+    var nearestIndex = 0;
+    var nearestDistance = Infinity;
+    var index;
+    for (index = 0; index < articlePages.length; index += 1) {
+      var distance = Math.abs(articlePages[index].offset - scrollPosition);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    }
+    return nearestIndex;
+  }
+
+  function showArticlePage(index, shouldScroll) {
+    if (!articlePaginationReady || !articlePages.length) return;
+    articlePageIndex = Math.max(0, Math.min(articlePages.length - 1, index));
+    var page = articlePages[articlePageIndex];
+    ensureArticlePageMasks();
+    setArticlePageMask(articleTopMask, page.topMask);
+    setArticlePageMask(articleBottomMask, page.bottomMask);
+    root.setAttribute("data-article-page-count", String(articlePages.length));
+    root.setAttribute("data-article-page-index", String(articlePageIndex + 1));
+    if (shouldScroll && Math.abs(currentScrollPosition() - page.offset) > 1) {
+      window.scrollTo(0, page.offset);
+    }
+  }
+
+  function syncArticlePageFromScroll() {
+    if (!articlePaginationReady) return;
+    var current = currentScrollPosition();
+    var nearest = nearestArticlePageIndex(current);
+    articlePageIndex = nearest;
+    if (Math.abs(articlePages[nearest].offset - current) <= 3) {
+      showArticlePage(nearest, false);
+    } else {
+      // Manual scrolling is still available. Do not cover text between book pages.
+      hideArticlePageMasks();
+      root.setAttribute("data-article-page-index", String(nearest + 1));
+    }
+  }
+
   function buildStreamPages(showLastPage) {
     if (!streamList) return;
     streamCards = streamList.querySelectorAll("[data-entry-card]");
@@ -376,7 +669,7 @@
 
   function updateTurnButtons() {
     if (!controls || isHidden(controls)) return;
-    var current = window.pageYOffset || root.scrollTop || 0;
+    var current = currentScrollPosition();
     var index;
     var direction;
     for (index = 0; index < turnButtons.length; index += 1) {
@@ -386,6 +679,10 @@
         disabled = direction > 0
           ? streamPageIndex >= streamPages.length - 1 && !adjacentUrl(direction)
           : streamPageIndex <= 0 && !adjacentUrl(direction);
+      } else if (articlePaginationReady) {
+        disabled = direction > 0
+          ? articlePageIndex >= articlePages.length - 1 && !adjacentUrl(direction)
+          : articlePageIndex <= 0 && !adjacentUrl(direction);
       } else {
         disabled = direction > 0
           ? current >= pageMaximum - 1 && !adjacentUrl(direction)
@@ -397,8 +694,10 @@
 
   function updateArticleEndCue() {
     if (!articleEndCue || streamControls) return;
-    var current = window.pageYOffset || root.scrollTop || 0;
-    var hidden = current < pageMaximum - 1;
+    var current = currentScrollPosition();
+    var hidden = articlePaginationReady
+      ? articlePageIndex < articlePages.length - 1
+      : current < pageMaximum - 1;
     if (isHidden(articleEndCue) !== hidden) setHidden(articleEndCue, hidden);
   }
 
@@ -423,14 +722,20 @@
     setClass(root, "has-page-turn-rails", !hidePageControls && sideControls);
     // Side rails narrow the article and can add wrapped lines.
     if (!hidePageControls) measurePage();
+    buildArticlePages();
     updateTurnButtons();
     updateArticleEndCue();
   }
 
   function restoreArticleEnd() {
     if (streamControls || window.location.hash !== "#end") return;
+    if (articlePaginationReady) {
+      showArticlePage(articlePages.length - 1, true);
+      updateTurnButtons();
+      return;
+    }
     measurePage();
-    if ((window.pageYOffset || root.scrollTop || 0) !== pageMaximum) {
+    if (currentScrollPosition() !== pageMaximum) {
       window.scrollTo(0, pageMaximum);
     }
     updateTurnButtons();
@@ -442,8 +747,11 @@
       window.clearTimeout(readingProgressTimer);
       readingProgressTimer = 0;
     }
-    var current = window.pageYOffset || root.scrollTop || 0;
-    var progress = pageMaximum ? Math.min(1, current / pageMaximum) : 1;
+    syncArticlePageFromScroll();
+    var current = currentScrollPosition();
+    var progress = articlePaginationReady
+      ? (articlePages.length > 1 ? articlePageIndex / (articlePages.length - 1) : 1)
+      : (pageMaximum ? Math.min(1, current / pageMaximum) : 1);
     var progressPercent = Math.round(progress * 100);
     if (progressPercent !== lastProgressPercent) {
       var progressTransform = "scaleX(" + (progressPercent / 100) + ")";
@@ -493,8 +801,29 @@
       }
       return;
     }
+    if (articlePaginationReady) {
+      syncArticlePageFromScroll();
+      var articleUrl = adjacentUrl(direction);
+      if (direction > 0 && articlePageIndex < articlePages.length - 1) {
+        showArticlePage(articlePageIndex + 1, true);
+      } else if (direction < 0 && articlePageIndex > 0) {
+        showArticlePage(articlePageIndex - 1, true);
+      } else if (articleUrl) {
+        if (direction > 0) {
+          advanceToArticle(articleUrl);
+        } else {
+          window.location.href = articleUrl.replace(/#.*$/, "") + "#end";
+        }
+        return;
+      }
+      window.setTimeout(function () {
+        updateTurnButtons();
+        updateReadingProgress();
+      }, 0);
+      return;
+    }
     measurePage();
-    var current = window.pageYOffset || root.scrollTop || 0;
+    var current = currentScrollPosition();
     var nextUrl = adjacentUrl(direction);
     var target;
     if (nextUrl && ((direction > 0 && current >= pageMaximum - 1) || (direction < 0 && current <= 0))) {
