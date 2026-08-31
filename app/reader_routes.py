@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from dataclasses import dataclass
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import (
@@ -30,6 +31,8 @@ from app.reader_navigation import (
 from app.utils import (
     compact_source_label,
     extract_hacker_news_comments_url,
+    hacker_news_destination_host,
+    hacker_news_item_id,
     is_comments_only_summary,
     truncate_text,
 )
@@ -56,6 +59,7 @@ class StreamItemView:
     is_starred: bool
     open_url: str
     source_label: str
+    destination_host: str | None
     comments_url: str | None
     summary_is_comments: bool
     is_read: bool
@@ -67,6 +71,13 @@ class ArticleNavigation:
     next_url: str | None
     next_title: str | None
     next_entry: FreshRSSEntry | None
+
+
+@dataclass(frozen=True)
+class HackerNewsEntryView:
+    destination_host: str | None
+    discussion_url: str | None
+    summary_is_discussion: bool
 
 
 class ReaderController:
@@ -418,7 +429,11 @@ class ReaderController:
         context_id = self.services.repository.save_reading_context(
             reading_context.encode()
         )
-        items = [self._stream_item(entry, context_id) for entry in page.entries]
+        stream_back_url = current_relative_url(request)
+        items = [
+            self._stream_item(entry, context_id, stream_back_url)
+            for entry in page.entries
+        ]
         document_title = (
             "All articles"
             if scope.kind == "home" and stream_request.include_read
@@ -520,6 +535,10 @@ class ReaderController:
             if reading_context
             else str(self.app.url_path_for("home"))
         )
+        hacker_news = self._hacker_news_entry_view(
+            entry,
+            current_relative_url(request),
+        )
         context = build_template_context(
             self.services,
             request,
@@ -533,6 +552,8 @@ class ReaderController:
                 "entry": entry,
                 "content_html": content_html,
                 "source_label": source_label,
+                "destination_host": hacker_news.destination_host,
+                "comments_url": hacker_news.discussion_url,
                 "fallback_used": article.extraction_status == "failed",
                 "error_message": article.error_message,
                 "body_class": "article-page",
@@ -672,13 +693,9 @@ class ReaderController:
         self,
         entry: FreshRSSEntry,
         context_id: str,
+        back_url: str,
     ) -> StreamItemView:
-        comments_url = extract_hacker_news_comments_url(
-            summary_html=entry.summary_html,
-            content_html=entry.content_html,
-            entry_url=entry.url,
-            feed_site_url=entry.feed_site_url,
-        )
+        hacker_news = self._hacker_news_entry_view(entry, back_url)
         return StreamItemView(
             id=entry.id,
             list_anchor=f"entry-{article_key(entry.id)}",
@@ -688,11 +705,45 @@ class ReaderController:
             is_starred=entry.is_starred,
             open_url=item_detail_url(self.app, entry.id, context_id),
             source_label=compact_source_label(entry.feed_title, entry.feed_site_url),
-            comments_url=comments_url,
-            summary_is_comments=bool(comments_url)
-            and is_comments_only_summary(entry.summary_text),
+            destination_host=hacker_news.destination_host,
+            comments_url=hacker_news.discussion_url,
+            summary_is_comments=hacker_news.summary_is_discussion,
             is_read=entry.is_read,
         )
+
+    def _hacker_news_entry_view(
+        self,
+        entry: FreshRSSEntry,
+        back_url: str,
+    ) -> HackerNewsEntryView:
+        comments_url = extract_hacker_news_comments_url(
+            summary_html=entry.summary_html,
+            content_html=entry.content_html,
+            entry_url=entry.url,
+            feed_site_url=entry.feed_site_url,
+        )
+        return HackerNewsEntryView(
+            destination_host=hacker_news_destination_host(
+                entry.url, entry.feed_site_url
+            ),
+            discussion_url=self._hacker_news_reader_url(comments_url, back_url),
+            summary_is_discussion=bool(comments_url)
+            and is_comments_only_summary(entry.summary_text),
+        )
+
+    def _hacker_news_reader_url(
+        self,
+        comments_url: str | None,
+        back_url: str,
+    ) -> str | None:
+        item_id = hacker_news_item_id(comments_url)
+        if item_id is None:
+            return comments_url
+        path = self.app.url_path_for(
+            "hacker_news_discussion",
+            item_id=str(item_id),
+        )
+        return f"{path}?{urlencode({'back': back_url})}"
 
     def _item_action(
         self,

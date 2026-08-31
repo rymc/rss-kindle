@@ -24,6 +24,10 @@
       <time class="item-time" datetime="{{ item.published_at or '' }}">{{ item.published_at|format_relative_time }}</time>
       <span class="meta-sep" aria-hidden="true">|</span>
       <span class="item-source">{{ item.source_label }}</span>
+      {% if item.destination_host %}
+      <span class="meta-sep" aria-hidden="true">·</span>
+      <span class="item-destination">{{ item.destination_host }}</span>
+      {% endif %}
       {% if include_read or request.url.path == '/starred' %}
       <span class="meta-sep" data-read-state-separator aria-hidden="true"{% if not item.is_read %} hidden{% endif %}>|</span>
       <span class="item-read-state" data-read-state{% if not item.is_read %} hidden{% endif %}>Read</span>
@@ -33,7 +37,7 @@
       <a href="{{ item.open_url }}" data-open-article>{{ item.title }}</a>
     </h2>
     {% if item.comments_url and item.summary_is_comments %}
-    <p><a href="{{ item.comments_url }}" rel="noreferrer">Comments</a></p>
+    <p><a href="{{ item.comments_url }}">Read discussion</a></p>
     {% elif item.summary_excerpt %}
     <p>{{ item.summary_excerpt }}</p>
     {% endif %}

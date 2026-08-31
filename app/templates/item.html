@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_reader_controls.html" import article_pager %}
 
 {% block content %}
 <nav class="article-corner-actions" aria-label="Article navigation">
@@ -10,6 +11,10 @@
     <h2>{{ entry.title }}</h2>
     <div class="item-meta item-meta-inline article-meta-compact">
       <span class="item-source">{{ source_label }}</span>
+      {% if destination_host %}
+      <span class="meta-sep" aria-hidden="true">·</span>
+      <span class="item-destination">{{ destination_host }}</span>
+      {% endif %}
       <span class="meta-sep" aria-hidden="true">·</span>
       <time class="item-time" datetime="{{ entry.published_at or '' }}">{{ entry.published_at|format_relative_time }}</time>
     </div>
@@ -33,6 +38,9 @@
     {% if entry.url %}
     <a class="button-link" href="{{ entry.url }}" rel="noreferrer">Open original</a>
     {% endif %}
+    {% if comments_url %}
+    <a class="button-link" href="{{ comments_url }}">Read discussion</a>
+    {% endif %}
   </div>
 </article>
 {% if next_url %}
@@ -41,14 +49,5 @@
   <input type="hidden" name="next_path" value="{{ next_url }}" data-article-next-path />
 </form>
 {% endif %}
-<nav class="page-turn-rails page-turn-rails-article" aria-label="Article page controls" data-page-mode="article" data-page-previous-url="{{ previous_url or '' }}" data-page-next-url="{{ next_url or '' }}" hidden>
-  <button type="button" class="page-turn-rail page-turn-rail-previous" data-page-turn="-1" aria-label="Previous page" title="Previous page">‹</button>
-  <button type="button" class="page-turn-rail page-turn-rail-next" data-page-turn="1" aria-label="Next page" title="Next page">›</button>
-</nav>
-<div class="article-reading-progress" data-reading-progress role="progressbar" aria-label="Article progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-  <span class="article-reading-progress-fill"></span>
-</div>
-<div class="article-end-cue" data-article-end-cue hidden>
-  <strong>End of article</strong>{% if next_url %}<span> · Next: {{ next_title or 'next article' }}</span>{% endif %}
-</div>
+{{ article_pager("Article", previous_url, next_url, next_title) }}
 {% endblock %}

@@ -1,0 +1,131 @@
+.hn-discussion-view {
+  max-width: 42rem;
+}
+
+.hn-story-header {
+  margin-bottom: 1rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 2px solid #315f70;
+}
+
+.hn-kicker {
+  margin: 0 0 0.2rem;
+  color: #315f70;
+  font-family: "Amazon Ember", Arial, Helvetica, sans-serif;
+  font-size: 0.78rem;
+  font-weight: bold;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hn-story-title {
+  margin: 0 0 0.35rem;
+  font-size: 1.45rem;
+  line-height: 1.25;
+}
+
+.hn-story-meta,
+.hn-comment-header,
+.hn-comment-footer,
+.hn-thread-note {
+  font-family: "Amazon Ember", Arial, Helvetica, sans-serif;
+}
+
+.hn-story-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+
+.hn-thread-note {
+  margin: 0.75rem 0 0;
+  padding: 0.55rem;
+  border-left: 3px solid #65777e;
+  background: #f1f4f5;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.hn-comments > h2 {
+  margin: 0 0 0.65rem;
+  font-size: 1.25rem;
+}
+
+.hn-comment {
+  box-sizing: border-box;
+  margin: 0 0 0.75rem;
+  padding: 0.65rem 0.7rem;
+  border: 0;
+  border-left: 3px solid #315f70;
+  background: #fff;
+}
+
+.hn-comment-depth-1 {
+  margin-left: 0.55rem;
+}
+
+.hn-comment-depth-2 {
+  margin-left: 1.1rem;
+}
+
+.hn-comment-depth-3 {
+  margin-left: 1.65rem;
+}
+
+.hn-comment-depth-4 {
+  margin-left: 2.2rem;
+}
+
+.hn-comment-muted {
+  border-color: #a7afb2;
+  background: #f3f4f4;
+  color: #4b5559;
+}
+
+.hn-comment-header {
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid #c4cccf;
+}
+
+.hn-comment-header h3 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.45rem;
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.25;
+  align-items: baseline;
+}
+
+.hn-comment-author {
+  color: #153f52;
+}
+
+.hn-comment-header time,
+.hn-comment-context {
+  color: #4e5d63;
+  font-size: 0.78rem;
+}
+
+.hn-comment-context {
+  flex-basis: 100%;
+}
+
+.hn-comment-body {
+  font-size: 1.04rem;
+  line-height: 1.55;
+}
+
+.hn-comment-body p {
+  margin: 0.55rem 0;
+}
+
+.hn-comment-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid #d2d7d9;
+  font-size: 0.78rem;
+}

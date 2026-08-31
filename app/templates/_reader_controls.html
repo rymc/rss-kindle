@@ -1,0 +1,13 @@
+{% macro article_pager(label, previous_url='', next_url='', next_title='') -%}
+{% set lower_label = label|lower %}
+<nav class="page-turn-rails page-turn-rails-article" aria-label="{{ label }} page controls" data-page-mode="article" data-page-previous-url="{{ previous_url or '' }}" data-page-next-url="{{ next_url or '' }}" hidden>
+  <button type="button" class="page-turn-rail page-turn-rail-previous" data-page-turn="-1" aria-label="Previous {{ lower_label }} page" title="Previous {{ lower_label }} page">‹</button>
+  <button type="button" class="page-turn-rail page-turn-rail-next" data-page-turn="1" aria-label="Next {{ lower_label }} page" title="Next {{ lower_label }} page">›</button>
+</nav>
+<div class="article-reading-progress" data-reading-progress role="progressbar" aria-label="{{ label }} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+  <span class="article-reading-progress-fill"></span>
+</div>
+<div class="article-end-cue" data-article-end-cue hidden>
+  <strong>End of {{ lower_label }}</strong>{% if next_url %}<span> · Next: {{ next_title or 'next article' }}</span>{% endif %}
+</div>
+{%- endmacro %}

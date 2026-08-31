@@ -393,6 +393,11 @@ button,
   font-weight: bold;
 }
 
+.item-destination {
+  color: #304850;
+  font-size: 0.84rem;
+}
+
 .item-read-state {
   font-size: 0.82rem;
   font-weight: bold;
@@ -686,6 +691,13 @@ button,
 
 .article-page-mask-bottom {
   bottom: 0;
+}
+
+.article-page-spacer {
+  height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .article-end-cue {

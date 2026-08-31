@@ -5,7 +5,7 @@ import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -127,9 +127,46 @@ def truncate_text(value: str | None, length: int = 280) -> str:
 
 @lru_cache(maxsize=512)
 def is_hacker_news_site(url: str | None) -> bool:
-    return bool(
-        url and (urlparse(url).hostname or "").lower() == "news.ycombinator.com"
-    )
+    return display_hostname(url) == "news.ycombinator.com"
+
+
+@lru_cache(maxsize=512)
+def display_hostname(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        hostname = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return None
+    return hostname or None
+
+
+@lru_cache(maxsize=512)
+def hacker_news_item_id(url: str | None) -> int | None:
+    if not _is_hacker_news_comments_url(url):
+        return None
+    raw_id = parse_qs(urlparse(url or "").query).get("id", [""])[0]
+    try:
+        item_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    return item_id if item_id > 0 else None
+
+
+@lru_cache(maxsize=512)
+def hacker_news_external_host(url: str | None) -> str | None:
+    hostname = display_hostname(url)
+    return hostname if hostname and hostname != "news.ycombinator.com" else None
+
+
+@lru_cache(maxsize=512)
+def hacker_news_destination_host(
+    entry_url: str | None,
+    feed_site_url: str | None,
+) -> str | None:
+    if not is_hacker_news_site(feed_site_url) or not entry_url:
+        return None
+    return hacker_news_external_host(entry_url)
 
 
 def extract_hacker_news_comments_url(
@@ -189,9 +226,12 @@ def parse_positive_int(value: str | None, default: int) -> int:
 def _is_hacker_news_comments_url(url: str | None) -> bool:
     if not url:
         return False
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
     return (
         parsed.scheme in {"http", "https"}
-        and (parsed.hostname or "").lower() == "news.ycombinator.com"
+        and display_hostname(url) == "news.ycombinator.com"
         and parsed.path == "/item"
     )

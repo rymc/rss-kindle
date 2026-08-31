@@ -183,8 +183,10 @@ def test_article_pages_show_complete_non_repeated_lines_with_book_rules(
                     ));
                     return {
                       ids: visible.map((line) => line.id),
+                      firstVisibleTop: visible.length ? visible[0].top : null,
                       partialLines,
-                      ruleViolation
+                      ruleViolation,
+                      topMaskHeight: topMask ? topMask.getBoundingClientRect().height : 0
                     };
                   }
 
@@ -211,10 +213,22 @@ def test_article_pages_show_complete_non_repeated_lines_with_book_rules(
                       (total, current) => total + current.partialLines, 0
                     ),
                     repeatedLines,
-                    ruleViolations: pages.filter((current) => current.ruleViolation).length
+                    ruleViolations: pages.filter((current) => current.ruleViolation).length,
+                    maximumTopMask: Math.max(
+                      ...pages.map((current) => current.topMaskHeight)
+                    ),
+                    finalPageFirstLine: pages.at(-1).firstVisibleTop
                   };
                 }"""
             )
+            page.set_viewport_size(
+                {"width": 600, "height": viewport_height + 1}
+            )
+            page.wait_for_function(
+                "document.documentElement.dataset.articlePageIndex === "
+                "document.documentElement.dataset.articlePageCount"
+            )
+            result["keptFinalPageAfterResize"] = True
         finally:
             browser.close()
 
@@ -223,3 +237,6 @@ def test_article_pages_show_complete_non_repeated_lines_with_book_rules(
     assert result["repeatedLines"] == 0
     assert result["ruleViolations"] == 0
     assert result["maskBlocksPointer"] is True
+    assert result["maximumTopMask"] <= 10
+    assert result["finalPageFirstLine"] <= 12
+    assert result["keptFinalPageAfterResize"] is True
