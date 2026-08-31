@@ -25,6 +25,7 @@
   var articlePaginationReady = false;
   var articleTopMask = null;
   var articleBottomMask = null;
+  var articlePageSpacer = null;
   var articleLineTolerance = 2;
   var articlePageTopGutter = 10;
   var articlePageBottomGutter = 10;
@@ -446,7 +447,7 @@
     return Math.max(firstLine, lastLine);
   }
 
-  function buildArticlePages() {
+  function buildArticlePages(preferredScrollPosition) {
     articlePages = [];
     articlePaginationReady = false;
     root.removeAttribute("data-article-page-count");
@@ -467,7 +468,7 @@
       var requestedOffset = firstLine === 0
         ? 0
         : Math.floor(lines[firstLine].top - articlePageTopGutter);
-      var offset = Math.max(0, Math.min(pageMaximum, requestedOffset));
+      var offset = Math.max(0, requestedOffset);
       var pageBottom = offset + pageViewport - articlePageBottomGutter;
       var lastLine = firstLine - 1;
       var lineIndex;
@@ -496,9 +497,16 @@
     if (!articlePaginationReady) {
       articlePages = [];
       hideArticlePageMasks();
+      resetArticlePageSpace();
+      measurePage();
       return;
     }
-    articlePageIndex = nearestArticlePageIndex(currentScrollPosition());
+    var finalPageOffset = articlePages[articlePages.length - 1].offset;
+    if (finalPageOffset > pageMaximum) {
+      setArticlePageSpace(finalPageOffset - pageMaximum);
+      measurePage();
+    }
+    articlePageIndex = nearestArticlePageIndex(preferredScrollPosition);
     showArticlePage(articlePageIndex, true);
   }
 
@@ -514,6 +522,20 @@
     setHidden(articleBottomMask, true);
     doc.body.appendChild(articleTopMask);
     doc.body.appendChild(articleBottomMask);
+  }
+
+  function setArticlePageSpace(height) {
+    if (!articlePageSpacer) {
+      articlePageSpacer = doc.createElement("div");
+      articlePageSpacer.className = "article-page-spacer";
+      articlePageSpacer.setAttribute("aria-hidden", "true");
+      articleView.parentNode.insertBefore(articlePageSpacer, articleView.nextSibling);
+    }
+    articlePageSpacer.style.height = Math.max(0, Math.ceil(height)) + "px";
+  }
+
+  function resetArticlePageSpace() {
+    if (articlePageSpacer) articlePageSpacer.style.height = "0px";
   }
 
   function setArticlePageMask(mask, height) {
@@ -713,6 +735,8 @@
       updateTurnButtons();
       return;
     }
+    var preferredScrollPosition = currentScrollPosition();
+    resetArticlePageSpace();
     measurePage();
     var hasAdjacentPage = Boolean(adjacentUrl(-1) || adjacentUrl(1));
     var hasOverflow = pageMaximum > 24;
@@ -722,7 +746,7 @@
     setClass(root, "has-page-turn-rails", !hidePageControls && sideControls);
     // Side rails narrow the article and can add wrapped lines.
     if (!hidePageControls) measurePage();
-    buildArticlePages();
+    buildArticlePages(preferredScrollPosition);
     updateTurnButtons();
     updateArticleEndCue();
   }

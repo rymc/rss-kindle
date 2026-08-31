@@ -16,6 +16,7 @@ from app.freshrss import (
     FreshRSSStreamPage,
     encode_feed_token,
 )
+from app.hacker_news import HackerNewsComment, HackerNewsDiscussion
 from app.main import create_app
 from app.repository import Repository
 
@@ -144,6 +145,16 @@ class FakeExtractor:
         )
 
 
+class FakeHackerNewsClient:
+    def __init__(self, discussion: HackerNewsDiscussion):
+        self.discussion = discussion
+        self.calls: list[int] = []
+
+    def get_discussion(self, item_id: int):
+        self.calls.append(item_id)
+        return self.discussion
+
+
 def build_settings(tmp_path: Path, **overrides) -> Settings:
     settings = Settings(
         app_name="RSS Kindle",
@@ -199,7 +210,12 @@ def freshrss_item_id(suffix: str) -> str:
     return f"tag:google.com,2005:reader/item/{suffix}"
 
 
-def build_app(tmp_path: Path, **settings_overrides):
+def build_app(
+    tmp_path: Path,
+    *,
+    hacker_news_client=None,
+    **settings_overrides,
+):
     settings = build_settings(tmp_path, **settings_overrides)
     repository = Repository(Database(settings.database_path))
     repository.initialize()
@@ -304,6 +320,7 @@ def build_app(tmp_path: Path, **settings_overrides):
         repository=repository,
         freshrss_client=client,
         extractor=FakeExtractor(),
+        hacker_news_client=hacker_news_client,
     )
     return TestClient(app), client, feed_token
 
@@ -1269,5 +1286,112 @@ def test_home_renders_hacker_news_comments_preview_as_comment_link(tmp_path: Pat
     response = client.get("/")
 
     assert response.status_code == 200
-    assert f'href="{comments_url}"' in response.text
+    soup = BeautifulSoup(response.text, "html.parser")
+    discussion_link = next(
+        link
+        for link in soup.find_all("a")
+        if link.get_text(strip=True) == "Read discussion"
+    )
+    assert discussion_link.get("href") == "/hacker-news/43849891?back=%2F"
+    assert soup.select_one(".item-destination").get_text(strip=True) == "github.com"
     assert "<p>Comments</p>" not in response.text
+
+    article_url = soup.select_one("[data-open-article]").get("href")
+    article = client.get(article_url)
+    article_soup = BeautifulSoup(article.text, "html.parser")
+    assert article_soup.select_one(".article-meta-compact .item-source").get_text(
+        strip=True
+    ) == "Hacker News"
+    assert article_soup.select_one(
+        ".article-meta-compact .item-destination"
+    ).get_text(strip=True) == "github.com"
+    article_discussion = next(
+        link
+        for link in article_soup.find_all("a")
+        if link.get_text(strip=True) == "Read discussion"
+    )
+    assert article_discussion.get("href").startswith(
+        "/hacker-news/43849891?back=%2Fread%2F"
+    )
+
+
+def test_hacker_news_discussion_renders_thread_for_kindle(tmp_path: Path):
+    discussion = HackerNewsDiscussion(
+        id=43849891,
+        title="Personal AI Development Environment",
+        author="submitter",
+        created_at="2026-03-29T10:21:00+00:00",
+        score=314,
+        comment_count=7,
+        comments=(
+            HackerNewsComment(
+                id=10,
+                author="alice",
+                created_at="2026-03-29T10:22:00+00:00",
+                html="<p>Top-level <strong>comment</strong>.</p>",
+                depth=0,
+                visual_depth=0,
+                parent_author=None,
+                reply_count=1,
+                permalink="https://news.ycombinator.com/item?id=10",
+                is_deleted=False,
+                is_dead=False,
+            ),
+            HackerNewsComment(
+                id=11,
+                author="bob",
+                created_at="2026-03-29T10:23:00+00:00",
+                html="<p>A nested reply.</p>",
+                depth=1,
+                visual_depth=1,
+                parent_author="alice",
+                reply_count=0,
+                permalink="https://news.ycombinator.com/item?id=11",
+                is_deleted=False,
+                is_dead=False,
+            ),
+        ),
+        source_url="https://github.com/rbren/personal-ai-devbox",
+        destination_host="github.com",
+        permalink="https://news.ycombinator.com/item?id=43849891",
+        is_partial=True,
+    )
+    hacker_news = FakeHackerNewsClient(discussion)
+    client, _, _ = build_app(
+        tmp_path,
+        hacker_news_client=hacker_news,
+    )
+
+    response = client.get("/hacker-news/43849891?back=%2Fstarred")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-cache"
+    soup = BeautifulSoup(response.text, "html.parser")
+    assert soup.select_one("body.hacker-news-page") is not None
+    assert soup.select_one(".hn-story-title").get_text(strip=True) == discussion.title
+    assert "submitter" in soup.select_one(".hn-story-meta").get_text(" ", strip=True)
+    assert "314 points" in soup.select_one(".hn-story-meta").get_text(" ", strip=True)
+    assert "github.com" in soup.select_one(".hn-story-meta").get_text(" ", strip=True)
+    assert [
+        author.get_text(strip=True)
+        for author in soup.select(".hn-comment-author")
+    ] == [
+        "alice",
+        "bob",
+    ]
+    assert soup.select_one(".hn-comment-depth-1") is not None
+    assert "Reply to alice · level 2" in soup.select_one(
+        ".hn-comment-depth-1 .hn-comment-context"
+    ).get_text(" ", strip=True)
+    assert "Top-level comment" in soup.select_one(
+        ".hn-comment-depth-0 .hn-comment-context"
+    ).get_text(" ", strip=True)
+    assert "Top-level comment" in soup.select_one(
+        ".hn-comment-body"
+    ).get_text(" ", strip=True)
+    assert soup.select_one(".hn-thread-note") is not None
+    assert soup.select_one("[data-close-article]").get("href") == "/starred"
+    controls = soup.select_one('[data-page-mode="article"]')
+    assert controls is not None
+    assert controls.get("aria-label") == "Discussion page controls"
+    assert hacker_news.calls == [43849891]

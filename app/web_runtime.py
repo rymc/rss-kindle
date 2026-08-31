@@ -32,6 +32,7 @@ from app.freshrss import (
     FreshRSSNavigation,
     FreshRSSStreamPage,
 )
+from app.hacker_news import HackerNewsDiscussion
 from app.mutations import MutationService
 from app.repository import Repository
 from app.utils import format_datetime, format_relative_time
@@ -69,6 +70,10 @@ class ArticleService(Protocol):
     def ensure_extracted(self, entry: FreshRSSEntry) -> ExtractedArticle: ...
 
 
+class HackerNewsService(Protocol):
+    def get_discussion(self, item_id: int) -> HackerNewsDiscussion: ...
+
+
 @dataclass(frozen=True)
 class WebServices:
     settings: Settings
@@ -76,6 +81,7 @@ class WebServices:
     freshrss: FreshRSSService
     mutations: MutationService
     extractor: ArticleService
+    hacker_news: HackerNewsService
     backup: BackupService
     admin: AdminService
     device_auth: DeviceAuthService | None
@@ -314,7 +320,9 @@ def _is_reader_page(path: str) -> bool:
     return (
         path == "/"
         or path in {"/starred", "/categories", "/feeds"}
-        or path.startswith(("/groups/", "/feeds/", "/read/", "/items/"))
+        or path.startswith(
+            ("/groups/", "/feeds/", "/read/", "/items/", "/hacker-news/")
+        )
     )
 
 
@@ -331,6 +339,7 @@ def close_services(services: WebServices) -> None:
         services.mutations,
         services.admin,
         services.extractor,
+        services.hacker_news,
         services.freshrss,
     ):
         close = getattr(service, "close", None)

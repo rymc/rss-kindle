@@ -5,6 +5,8 @@ from app.utils import (
     compact_source_label,
     extract_hacker_news_comments_url,
     format_relative_time,
+    hacker_news_destination_host,
+    hacker_news_item_id,
     is_comments_only_summary,
     is_kindle_user_agent,
 )
@@ -105,6 +107,36 @@ def test_extract_hacker_news_comments_url_prefers_hn_discussion_link():
     )
 
     assert comments_url == "https://news.ycombinator.com/item?id=43849891"
+
+
+def test_hacker_news_helpers_identify_discussion_and_destination():
+    assert (
+        hacker_news_item_id("https://news.ycombinator.com/item?id=43849891")
+        == 43849891
+    )
+    assert hacker_news_item_id("https://example.com/item?id=43849891") is None
+    assert hacker_news_item_id("https://news.ycombinator.com/item?id=bad") is None
+    assert (
+        hacker_news_destination_host(
+            "https://www.github.com/example/project",
+            "https://news.ycombinator.com/",
+        )
+        == "github.com"
+    )
+    assert (
+        hacker_news_destination_host(
+            "https://news.ycombinator.com/item?id=1",
+            "https://news.ycombinator.com/",
+        )
+        is None
+    )
+    assert (
+        hacker_news_destination_host(
+            "https://[/invalid",
+            "https://news.ycombinator.com/",
+        )
+        is None
+    )
 
 
 def test_is_comments_only_summary_matches_comment_only_previews():

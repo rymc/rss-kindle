@@ -19,12 +19,15 @@ from app.dashboard_routes import DashboardController
 from app.db import Database
 from app.device_auth import DeviceAuthService
 from app.freshrss import FreshRSSClient
+from app.hacker_news import HackerNewsClient
+from app.hacker_news_routes import HackerNewsController
 from app.mutations import DurableMutationQueue, ImmediateMutationService
 from app.reader_routes import ReaderController
 from app.repository import Repository
 from app.web_runtime import (
     ArticleService,
     FreshRSSService,
+    HackerNewsService,
     WebServices,
     allowed_reader_hosts,
     build_templates,
@@ -39,12 +42,14 @@ def create_app(
     repository: Repository | None = None,
     freshrss_client: FreshRSSService | None = None,
     extractor: ArticleService | None = None,
+    hacker_news_client: HackerNewsService | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     repository = repository or Repository(Database(settings.database_path))
     repository.initialize()
     freshrss = freshrss_client or FreshRSSClient(settings)
     article_service = extractor or ArticleExtractor(settings, repository)
+    hacker_news = hacker_news_client or HackerNewsClient(settings)
     mutations = (
         DurableMutationQueue(repository, freshrss)
         if isinstance(freshrss, FreshRSSClient)
@@ -64,6 +69,7 @@ def create_app(
         freshrss=freshrss,
         mutations=mutations,
         extractor=article_service,
+        hacker_news=hacker_news,
         backup=backup,
         admin=admin,
         device_auth=device_auth,
@@ -96,6 +102,7 @@ def create_app(
         name="favicon",
         include_in_schema=False,
     )
+    app.include_router(HackerNewsController(services).router)
     app.include_router(ReaderController(app, services).router)
     app.include_router(AccountController(app, services).router)
     app.include_router(DashboardController(app, services).router)
